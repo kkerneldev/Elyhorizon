@@ -1,5 +1,5 @@
-//! The player's own download of the pinned version from Mojang, for a signed-in account that
-//! owns Minecraft: Java Edition (#434), as other launchers get it: the version JSON, the client
+//! The player's own download of the pinned version from Mojang, after a fresh Microsoft
+//! ownership or Ely.by authentication check: the version JSON, the client
 //! jar, this system's libraries and the assets (the sounds), each checked against its sha1,
 //! in the official launcher's layout in the launcher's data folder. sources.rs then finds them
 //! there like any launcher's. Nothing of Mojang's is part of Horizon.

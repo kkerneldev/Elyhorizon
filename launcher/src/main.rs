@@ -14,6 +14,7 @@ mod console_page;
 mod cull;
 mod datapacks_page;
 mod dev_options;
+mod ely_page;
 mod export_page;
 mod frame;
 mod game_tools;
@@ -320,6 +321,7 @@ struct Launcher {
     proxy_input: line_edit::LineEdit,
     proxy_focused: bool,
     proxy_focus: FocusHandle,
+    ely: ely_page::ElyUi,
     /// Opt-in data collection: the player's answer and Settings' section (`collection`).
     collection: collection::Collection,
     /// Settings' "Connect an AI agent" (`agents_page`).
@@ -532,6 +534,7 @@ impl Launcher {
             ),
             proxy_focused: false,
             proxy_focus: cx.focus_handle(),
+            ely: ely_page::ElyUi::default(),
             settings,
             settings_save_error: None,
             links: backend::Links::default(),
@@ -632,7 +635,7 @@ impl Launcher {
         std::thread::spawn(move || {
             let store = account::store();
             let _ = keychain_tx.send(Msg::Keychain(account::no_keychain()));
-            let _ = keychain_tx.send(Msg::Owner(accounts.has_owner(store)));
+            let _ = keychain_tx.send(Msg::Owner(accounts.can_play(store)));
         });
         std::thread::spawn(move || {
             let reused = backend::reuse_prepared_everywhere();
@@ -1310,6 +1313,9 @@ impl Launcher {
         changed |= self.native_log_read(cx);
         if let Some(sign_in) = &self.sign_in {
             if let Some(state) = sign_in_change(&mut self.sign_in_state, sign_in.state()) {
+                if let SignInState::Browser(ref url) = state {
+                    cx.open_url(url);
+                }
                 if let SignInState::Done(Ok(ref account)) = state {
                     self.auth_busy.remove(&account.uuid);
                     self.sign_in_target = None;
@@ -1675,7 +1681,7 @@ impl Launcher {
                 let _ = tx.send(Msg::AccountRemoved(
                     uuid,
                     generation,
-                    Ok(Accounts::load().has_owner(account::store())),
+                    Ok(Accounts::load().can_play(account::store())),
                 ));
             }
         });
@@ -1688,12 +1694,21 @@ impl Launcher {
 
     fn re_sign_in(&mut self, uuid: &str) {
         if let Some(account) = self.accounts.find(uuid).cloned() {
+            if account.is_ely() {
+                self.cancel_sign_in();
+                self.ely.active = true;
+                self.sign_in_target = Some(account);
+                self.page = Page::Settings;
+                self.submit_ely();
+                return;
+            }
             self.begin_sign_in(Some(account));
         }
     }
 
     fn begin_sign_in(&mut self, target: Option<account::Account>) {
         self.cancel_sign_in();
+        self.ely.active = false;
         self.sign_in = Some(match &target {
             Some(account) => SignIn::start_for(account.clone()),
             None => SignIn::start(),
@@ -3883,7 +3898,9 @@ impl Launcher {
                 .filter(|a| a.uuid == uuid)
                 .and_then(|_| match self.sign_in_state.as_ref() {
                     Some(SignInState::Starting) => Some("Asking Microsoft…"),
-                    Some(SignInState::Code(_)) => Some("Waiting for browser sign-in…"),
+                    Some(SignInState::Code(_) | SignInState::Browser(_)) => {
+                        Some("Waiting for browser sign-in…")
+                    }
                     Some(SignInState::Working(phase)) => Some(phase.label()),
                     _ => None,
                 });
@@ -3937,7 +3954,7 @@ impl Launcher {
                         let result = accounts
                             .remove(account::store(), &uuid)
                             .and_then(|()| accounts.save())
-                            .map(|()| accounts.has_owner(account::store()));
+                            .map(|()| accounts.can_play(account::store()));
                         let _ = tx.send(Msg::AccountRemoved(uuid, generation, result));
                     });
                     cx.notify();
@@ -3949,7 +3966,13 @@ impl Launcher {
                 a.name.clone(),
                 Some(
                     div()
-                        .child(tr(if plays {
+                        .child(tr(if a.is_ely() {
+                            if plays {
+                                "Ely.by account · plays"
+                            } else {
+                                "Ely.by account"
+                            }
+                        } else if plays {
                             "Microsoft account · plays"
                         } else {
                             "Microsoft account"
@@ -3966,13 +3989,25 @@ impl Launcher {
                 &t,
             ));
         }
+        let microsoft_target = self.sign_in_target.clone().filter(|a| !a.is_ely());
         let configured = account::client_id().is_some();
         let busy = matches!(
             self.sign_in_state,
-            Some(SignInState::Starting | SignInState::Code(_) | SignInState::Working(_))
+            Some(
+                SignInState::Starting
+                    | SignInState::Browser(_)
+                    | SignInState::Code(_)
+                    | SignInState::Working(_)
+            )
         );
-        let detail = match &self.sign_in_state {
+        let microsoft_state = if self.ely.active {
+            None
+        } else {
+            self.sign_in_state.as_ref()
+        };
+        let detail = match microsoft_state {
             _ if !configured => div().child(tr(account::NOT_CONFIGURED)),
+            Some(SignInState::Browser(_)) => div(),
             Some(SignInState::Starting) => div().child(tr("Asking Microsoft…")),
             Some(SignInState::Working(phase)) => div().child(tr(phase.label())),
             Some(SignInState::Code(code)) => div()
@@ -3998,7 +4033,7 @@ impl Launcher {
             )),
             None => div().child(tr("Add another account.")),
         };
-        let detail = if let Some(target) = &self.sign_in_target {
+        let detail = if let Some(target) = &microsoft_target {
             div()
                 .flex()
                 .flex_col()
@@ -4062,7 +4097,7 @@ impl Launcher {
                     .into_any_element(),
             )
         } else {
-            let target = self.sign_in_target.as_ref().map(|a| a.uuid.clone());
+            let target = microsoft_target.as_ref().map(|a| a.uuid.clone());
             let targeted = target.is_some();
             // Re-signing one account names it; adding one is Microsoft's own button.
             let sign_in = if targeted {
@@ -4093,7 +4128,7 @@ impl Launcher {
             Some(actions.into_any_element())
         };
         n += 1;
-        let title = match &self.sign_in_target {
+        let title = match &microsoft_target {
             Some(target) => trf("Sign in again as {name}", &[("name", &target.name)]),
             None if self.accounts.accounts.is_empty() => tr("Microsoft account").to_owned(),
             None => tr("Another account").to_owned(),
@@ -4103,6 +4138,14 @@ impl Launcher {
             title,
             Some(detail.into_any_element()),
             action,
+            &t,
+        ));
+        n += 1;
+        rows = rows.child(index_row(
+            n,
+            tr("Ely.by account"),
+            Some(self.ely_form(cx).into_any_element()),
+            None,
             &t,
         ));
         (rows, n)

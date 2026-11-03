@@ -30,6 +30,25 @@ pub const TEXTURE_URIS: [&str; 2] = [
     "http://textures.minecraft.net/texture/{textureId}",
 ];
 
+pub const ELY_TEXTURE_URIS: [&str; 8] = [
+    "https://textures.ely.by/",
+    "http://textures.ely.by/",
+    "https://ely.by/storage/",
+    "http://ely.by/storage/",
+    "https://skinsystem.ely.by/",
+    "http://skinsystem.ely.by/",
+    "https://textures.minecraft.net/texture/{textureId}",
+    "http://textures.minecraft.net/texture/{textureId}",
+];
+
+pub fn texture_uris() -> &'static [&'static str] {
+    if crate::auth::using_ely() {
+        &ELY_TEXTURE_URIS
+    } else {
+        &TEXTURE_URIS
+    }
+}
+
 /// `java.util.Base64.getDecoder().decode`.
 pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
     use base64::{
@@ -95,7 +114,7 @@ pub fn unpack(value: &str, signature: Signature, valid_uris: &[&str]) -> Texture
 /// those textures be unsigned (`getInsecureSkinInformation`).
 pub fn profile_skin_url(profile: &serde_json::Value) -> Option<String> {
     let (value, signature) = parse_profile(profile).textures?;
-    unpack(&value, signature, &TEXTURE_URIS).skin
+    unpack(&value, signature, texture_uris()).skin
 }
 
 /// The textures of a Minecraft services `/minecraft/profile` answer: the
@@ -155,7 +174,7 @@ pub fn profile_skin_url_nbt(profile: &horizon_world::nbt::Tag) -> Option<String>
             .then(|| nbt_text(p.get("value")))
             .flatten()
     })?;
-    unpack(&value, Signature::Unsigned, &TEXTURE_URIS).skin
+    unpack(&value, Signature::Unsigned, texture_uris()).skin
 }
 
 /// `ResolvableProfile.skinPatch().body()` of a skull's `profile` NBT: the
@@ -487,7 +506,7 @@ pub fn head_skin(
         }
     });
     if let Some((value, signature)) = property
-        && let Some(url) = unpack(&value, signature, &TEXTURE_URIS).skin
+        && let Some(url) = unpack(&value, signature, texture_uris()).skin
         && let Some(hash) = texture_hash(&url)
     {
         let location = skin_location(&hash);
@@ -1086,6 +1105,38 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ely_textures_are_accepted_only_for_the_ely_allowlist() {
+        use base64::Engine;
+        let encoded = |url: &str| {
+            base64::engine::general_purpose::STANDARD.encode(
+            serde_json::json!({"textures": {"SKIN": {"url": url, "metadata": {"model": "slim"}}, "CAPE": {"url": "https://ely.by/storage/cloaks/test.png"}}}).to_string())
+        };
+        let value = encoded("https://ely.by/storage/skins/test.png");
+        let textures = super::unpack(&value, super::Signature::Unsigned, &super::ELY_TEXTURE_URIS);
+        assert!(textures.slim && textures.skin.is_some() && textures.cape.is_some());
+        assert!(
+            super::unpack(&value, super::Signature::Unsigned, &super::TEXTURE_URIS)
+                .skin
+                .is_none()
+        );
+        for url in [
+            "https://ely.by.evil.example/storage/skin.png",
+            "https://ely.by@evil.example/storage/skin.png",
+            "file:///etc/passwd",
+            "http://127.0.0.1/skin.png",
+        ] {
+            assert!(
+                super::unpack(
+                    &encoded(url),
+                    super::Signature::Unsigned,
+                    &super::ELY_TEXTURE_URIS
+                )
+                .skin
+                .is_none()
+            );
+        }
+    }
     /// A profile's `texture` names a pack texture, never a file outside the
     /// packs: bad characters and `..` segments draw nothing.
     #[test]

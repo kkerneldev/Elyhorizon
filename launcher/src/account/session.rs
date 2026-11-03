@@ -83,7 +83,7 @@ impl Status {
         let state = match secrets {
             None => State::SignInRequired,
             Some(s) if s.sign_in_required => State::SignInRequired,
-            Some(s) if !s.owns => State::OwnershipRequired,
+            Some(s) if !s.owns && !s.ely => State::OwnershipRequired,
             Some(s) if s.minecraft_expires_at <= now() + RENEW_BEFORE => State::NeedsRefresh,
             Some(_) => State::Ready,
         };

@@ -308,6 +308,8 @@ fn notch() -> Account {
 /// A signed-in account's secrets: a token good for two hours, and the last ownership answer.
 fn secrets(token: &str, owns: bool) -> Secrets {
     Secrets {
+        ely: false,
+        ely_oauth: false,
         refresh_token: "ms-refresh-1".into(),
         sign_in_required: false,
         minecraft_token: token.into(),
@@ -648,6 +650,8 @@ fn accounts_keep_secrets_in_the_store_only() {
         cape: None,
     };
     let secrets = Secrets {
+        ely: false,
+        ely_oauth: false,
         refresh_token: "r".into(),
         sign_in_required: false,
         minecraft_token: "mc-secret".into(),
@@ -950,6 +954,8 @@ fn session_files_are_private_and_complete() {
         cape: None,
     };
     let secrets = Secrets {
+        ely: false,
+        ely_oauth: false,
         refresh_token: "r".into(),
         sign_in_required: false,
         minecraft_token: "mc-token".into(),
@@ -975,6 +981,20 @@ fn session_files_are_private_and_complete() {
     }
     let other = write_session_file(&dir, &account, &secrets).unwrap();
     assert_ne!(path, other);
+    let ely = Account {
+        uuid: format!("ely:{UUID}"),
+        name: "ElyPlayer".into(),
+        ..account
+    };
+    let ely_secrets = Secrets {
+        ely: true,
+        ..secrets
+    };
+    let path = write_session_file(&dir, &ely, &ely_secrets).unwrap();
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(v["name"], "ElyPlayer");
+    assert_eq!(v["uuid"], UUID);
+    assert_eq!(v["user_type"], "elyby");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

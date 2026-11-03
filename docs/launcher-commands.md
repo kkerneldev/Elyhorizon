@@ -127,6 +127,22 @@ Show the Discord, sponsor and website links.
 
 MCP: `links`.
 
+## `horizon-launcher account ely-configure`
+
+Configure this launcher's Ely.by OAuth app in the OS keychain. Read JSON containing client_id, client_secret and optional redirect_uri from stdin; never put secrets in arguments.
+
+    horizon-launcher account ely-configure
+
+MCP: none: the player's switch.
+
+## `horizon-launcher account ely-sign-in`
+
+Sign in to Ely.by in your browser; passwords and two-factor codes stay on Ely.by.
+
+    horizon-launcher account ely-sign-in
+
+MCP: `account_ely_sign_in`.
+
 ## `horizon-launcher account list`
 
 The signed-in accounts and which one plays.

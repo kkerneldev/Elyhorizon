@@ -1475,9 +1475,8 @@ fn download_for_owner(
     log: &dyn Fn(String),
 ) -> Result<(), String> {
     let mut accounts = account::Accounts::load();
-    // The strict gate, never `launch_for_game`: the developer option that lets offline names
-    // play without an owner must not download the game for them.
-    let pass = account::launch(
+    // Fresh provider authorization only. The offline developer option cannot download files.
+    let pass = account::launch_for_download(
         &account::Endpoints::live(),
         account::client_id().as_deref(),
         account::store(),
@@ -1528,7 +1527,6 @@ pub fn java_game(
             instance.name
         )
     })?;
-    let player = account::java_player()?;
     let minecraft = data_dir().join("minecraft");
     let id = mojang::relative(&game.minecraft)?;
     let natives = minecraft.join("natives").join(&id);
@@ -1574,7 +1572,15 @@ pub fn java_game(
             crate::java::install(&need, log)?
         }
     };
-    let jvm_args: Vec<String> = game.jvm_args.split_whitespace().map(String::from).collect();
+    // Installing missing files can renew an Ely token. Obtain the game's session
+    // after all downloads, so the command cannot retain a token that was replaced.
+    let player = account::java_player()?;
+    let mut jvm_args: Vec<String> = game.jvm_args.split_whitespace().map(String::from).collect();
+    if player.ely {
+        jvm_args.push(account::ely::java_agent(
+            &data_dir().join("authlib-injector"),
+        )?);
+    }
     fs::create_dir_all(&instance.home).map_err(|e| format!("{}: {e}", instance.home.display()))?;
     crate::java_launch::command(
         &version,
@@ -1595,8 +1601,7 @@ pub fn java_game(
     )
 }
 
-/// What [`download_for_owner`] does with the owner gate's answer: Mojang's files only for its
-/// `owner`, an account the services said owns the game just now.
+/// Install files only after a fresh Microsoft ownership or Ely.by authentication check.
 fn download_for(
     pins: &sources::Pins,
     dir: &Path,
@@ -1607,14 +1612,9 @@ fn download_for(
 ) -> Result<(), String> {
     let v = &pins.version;
     match pass {
-        Ok(account::Launch {
-            owner: Some((owner, _)),
-            ..
-        }) => {
-            let name = owner.name;
-            log(format!(
-                "{name} owns Minecraft: downloading {v} from Mojang"
-            ));
+        Ok(pass) if pass.download_name().is_some() => {
+            let name = pass.download_name().expect("checked download authorization");
+            log(crate::i18n::trf("Downloading Minecraft {version} from official servers for {name}.", &[("version", v), ("name", name)]));
             let os = match sources::Os::current() {
                 sources::Os::Linux => "linux",
                 sources::Os::MacOs => "osx",
@@ -1624,20 +1624,12 @@ fn download_for(
                 format!("\n  • Horizon tried to download {v} from Mojang for {name}, but: {e}")
             })
         }
-        // An owner by its last answer, who can't be asked now.
-        Ok(pass) => Err(format!(
-            "\n  • Downloading {v} from Mojang needs your Microsoft account, which could not be \
-             checked: {}",
-            pass.offline.unwrap_or_default()
+        Ok(pass) => Err(crate::i18n::trf(
+            "Downloading Minecraft {version} needs a fresh sign-in. The account could not be checked: {reason}",
+            &[("version", v), ("reason", &pass.offline.unwrap_or_default())],
         )),
-        Err(_) if signed_in => Err(
-            "\n  • No signed-in account owns Minecraft: Java Edition, so Horizon can't download it."
-                .into(),
-        ),
-        Err(_) => Err(format!(
-            "\n  • Or sign in with the Microsoft account that owns Minecraft: Horizon then \
-             downloads {v} from Mojang itself."
-        )),
+        Err(_) if signed_in => Err(crate::i18n::tr("Sign in again with Ely.by or a Microsoft account that owns Minecraft before downloading game files.").into()),
+        Err(_) => Err(crate::i18n::tr("Sign in with Ely.by or a Microsoft account that owns Minecraft to install game files automatically.").into()),
     }
 }
 
@@ -2257,12 +2249,41 @@ pub fn client_command(tag: &str) -> Command {
 /// show Horizon's name and icon (game_app.rs); the bare binary elsewhere, or if that fails.
 fn client_program(tag: &str) -> PathBuf {
     let dir = version_dir(tag);
+    if let Some(bundled) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| bundled_client(tag, &dir, exe.parent()?))
+    {
+        return bundled;
+    }
     #[cfg(target_os = "macos")]
     match crate::game_app::ensure(&dir) {
         Ok(program) => return program,
         Err(e) => eprintln!("Starting the game outside {}: {e}", crate::game_app::APP),
     }
     dir.join(CLIENT)
+}
+
+/// A fork's launcher can ship its matching game beside it. Never substitute it
+/// into a native-mod or imported build, or run it on another Minecraft data set.
+fn bundled_client(tag: &str, version: &Path, executable_dir: &Path) -> Option<PathBuf> {
+    if crate::native_mods::is_native(tag) || crate::build_import::is_imported(tag) {
+        return None;
+    }
+    let bundled = executable_dir.join(CLIENT);
+    if !bundled.is_file() {
+        return None;
+    }
+    let installed = read_json(&version.join("research-lock.json"))?;
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("../../research-lock.json")).ok()?;
+    for key in ["version", "client_sha1", "server_sha1"] {
+        let pointer = format!("/minecraft/{key}");
+        let value = expected.pointer(&pointer)?;
+        if installed.pointer(&pointer) != Some(value) {
+            return None;
+        }
+    }
+    Some(bundled)
 }
 
 pub fn server_command(tag: &str, folder: &Path) -> Command {
@@ -3536,7 +3557,7 @@ mod tests {
     /// account the services said owns the game: never without one, and never past the gate by
     /// the developer option (`Settings::dev_offline`), whose pass has no owner.
     #[test]
-    fn mojang_downloads_only_for_an_owner() {
+    fn mojang_downloads_only_for_fresh_provider_authorization() {
         let dir = std::env::temp_dir().join(format!("horizon-owner-only-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let pins = sources::Pins::read(&serde_json::json!({ "minecraft": {
@@ -3628,7 +3649,7 @@ mod tests {
             &backend[start..start + backend[start + 1..].find("\n}\n").unwrap()]
         };
         assert!(body("download_for").contains("mojang::download("));
-        assert!(body("download_for_owner").contains("account::launch("));
+        assert!(body("download_for_owner").contains("account::launch_for_download("));
         assert!(!body("download_for_owner").contains("launch_for_game("));
         // `download_for` is defined once and called once, by `download_for_owner`.
         assert_eq!(backend.matches("download_for(").count(), 2);
@@ -3668,6 +3689,66 @@ pub fn {f}("
                 );
             }
         }
+    }
+
+    #[test]
+    fn authenticated_ely_downloads_and_verifies_the_complete_game_layout() {
+        const MANIFEST: &[u8] = br#"{"id":"26.3","downloads":{"client":{"url":"https://example.test/client.jar","sha1":"7e13af1920ce1426d28a6938b40e9fbcdbe81822","size":14}},"libraries":[],"assetIndex":{"id":"empty","url":"https://example.test/assets.json","sha1":"62ea787c1f800c091b98678b050453a5ae59d7bc","size":14}}"#;
+        let dir = std::env::temp_dir().join(format!("ely-download-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let pins = sources::Pins::for_version("26.3", "02fa1e9c69fde68cbf336a5105952e3db90573aa");
+        let account = account::Account {
+            uuid: "ely:ffc8fdc95824509e8a57c99b940fb996".into(),
+            name: "ElyPlayer".into(),
+            skin: None,
+            cape: None,
+        };
+        let secrets = || {
+            serde_json::from_str(r#"{"ely":true,"ely_oauth":true,"refresh_token":"r","minecraft_token":"t","minecraft_expires_at":9999999999,"owns":false}"#).unwrap()
+        };
+        let fetch = |url: &str| -> Result<Vec<u8>, String> {
+            if url.ends_with("/26.3.json") {
+                Ok(MANIFEST.to_vec())
+            } else if url == "https://example.test/client.jar" {
+                Ok(b"fixture-client".to_vec())
+            } else if url == "https://example.test/assets.json" {
+                Ok(br#"{"objects":{}}"#.to_vec())
+            } else {
+                panic!("Unexpected download {url}")
+            }
+        };
+        let pass = || account::Launch {
+            session: Some((account.clone(), secrets())),
+            ..Default::default()
+        };
+        let mut stale = pass();
+        stale.offline = Some("provider unavailable".into());
+        assert!(download_for(
+            &pins,
+            &dir,
+            Ok(stale),
+            true,
+            &|_| panic!("stale session downloaded a file"),
+            &|_| {}
+        )
+        .is_err());
+        download_for(&pins, &dir, Ok(pass()), true, &fetch, &|_| {}).unwrap();
+        assert_eq!(
+            fs::read(dir.join("versions/26.3/26.3.jar")).unwrap(),
+            b"fixture-client"
+        );
+        assert_eq!(
+            fs::read(dir.join("assets/indexes/empty.json")).unwrap(),
+            br#"{"objects":{}}"#
+        );
+        // A damaged cached JAR is checked and fetched again, rather than trusted.
+        fs::write(dir.join("versions/26.3/26.3.jar"), b"damaged").unwrap();
+        download_for(&pins, &dir, Ok(pass()), true, &fetch, &|_| {}).unwrap();
+        assert_eq!(
+            fs::read(dir.join("versions/26.3/26.3.jar")).unwrap(),
+            b"fixture-client"
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     /// A preparation that reuses the imported game files still reads the assets from the
@@ -5143,4 +5224,32 @@ pub fn {f}("
             "Title\n\nSome words and a link (https://x.y).\n\n- one\n- two\n"
         );
     }
+}
+#[test]
+fn a_matching_bundled_game_is_used_without_replacing_custom_or_incompatible_builds() {
+    let root = std::env::temp_dir().join(format!("horizon-bundled-client-{}", std::process::id()));
+    let version = root.join("version");
+    let bundled = root.join("launcher");
+    fs::create_dir_all(&version).unwrap();
+    fs::create_dir_all(&bundled).unwrap();
+    fs::write(bundled.join(CLIENT), b"local game fixture").unwrap();
+    fs::write(
+        version.join("research-lock.json"),
+        include_bytes!("../../research-lock.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        bundled_client("nightly-2026-11-03-f42ef42", &version, &bundled),
+        Some(bundled.join(CLIENT))
+    );
+    for custom in ["native-test", "imported-2026-11-03-test"] {
+        assert!(bundled_client(custom, &version, &bundled).is_none());
+    }
+    let mut pins: serde_json::Value =
+        serde_json::from_str(include_str!("../../research-lock.json")).unwrap();
+    pins["minecraft"]["client_sha1"] = serde_json::json!("another-client-jar");
+    fs::write(version.join("research-lock.json"), pins.to_string()).unwrap();
+    assert!(bundled_client("nightly-test", &version, &bundled).is_none());
+    assert!(bundled_client("nightly-test", &version, &root.join("missing")).is_none());
+    fs::remove_dir_all(root).unwrap();
 }

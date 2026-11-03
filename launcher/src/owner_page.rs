@@ -46,7 +46,8 @@ impl Launcher {
         // The screenshot preview shows a code without asking Microsoft for one.
         let state = match &self.sign_in_state {
             _ if sign_in_preview() => Shown::Code("https://www.microsoft.com/link", "K7Q-4MXR"),
-            _ if !configured => Shown::Error(tr(account::NOT_CONFIGURED)),
+            Some(SignInState::Starting) if self.ely.active => Shown::Idle,
+            Some(SignInState::Browser(_)) => Shown::Idle,
             Some(SignInState::Starting) => Shown::Starting("Asking Microsoft…"),
             Some(SignInState::Working(phase)) => Shown::Starting(phase.label()),
             Some(SignInState::Code(code)) => Shown::Code(&code.verification_uri, &code.user_code),
@@ -66,7 +67,7 @@ impl Launcher {
             .child(
                 shell::text(theme::night::CAPTION, shell::c(n.muted))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(tr("Microsoft account").to_string()),
+                    .child(tr("Account").to_string()),
             )
             .child(
                 shell::text(theme::night::TITLE, shell::c(n.ink))
@@ -74,7 +75,7 @@ impl Launcher {
                     .child(tr("Sign in to play").to_string()),
             )
             .child(line(
-                "Horizon needs a Microsoft account that owns Minecraft: Java Edition, like other launchers.",
+                "Sign in with Ely.by or a Microsoft account that owns Minecraft to install game files automatically.",
                 n.ink_soft,
             ))
             .child(line(
@@ -161,7 +162,7 @@ impl Launcher {
                 )
             }
             Shown::Starting(_) => None,
-            Shown::Error(_) if !configured => None,
+            _ if !configured => None,
             _ => Some(
                 microsoft::sign_in_button("owner-sign-in", &t).on_click(cx.listener(
                     |this, _: &ClickEvent, _, cx| {
@@ -206,6 +207,7 @@ impl Launcher {
         .max_w_full()
         .p(px(32.))
         .child(body)
+        .child(self.ely_form(cx))
         .child(answers)
         .children(waiting);
         // The sky stays behind, dimmed: the sheet is over the launcher, not instead of it.

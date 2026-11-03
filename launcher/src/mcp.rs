@@ -197,13 +197,14 @@ impl Session {
                 let accounts = Accounts::load();
                 let sign_in = self.sign_in.as_ref().map(|s| match s.state() {
                     SignInState::Starting => json!({ "state": "starting" }),
+                    SignInState::Browser(url) => json!({ "state": "waiting for the browser", "link": url }),
                     SignInState::Working(phase) => json!({ "state": "working", "phase": phase }),
                     SignInState::Code(c) => json!({ "state": "waiting for the player", "link": c.verification_uri, "code": c.user_code }),
                     SignInState::Done(Ok(a)) => json!({ "state": "signed in", "name": a.name }),
                     SignInState::Done(Err(e)) => json!({ "state": "failed", "error": e }),
                 });
                 Ok(serde_json::to_string_pretty(&json!({
-                    "accounts": accounts.accounts.iter().map(|a| json!({ "name": a.name, "uuid": a.uuid, "authentication": account::session::status(account::store(), &a.uuid) })).collect::<Vec<_>>(),
+                    "accounts": accounts.accounts.iter().map(|a| json!({ "name": a.name, "uuid": a.uuid, "profile_uuid": a.profile_uuid(), "provider": if a.is_ely() { "elyby" } else { "microsoft" }, "authentication": account::session::status(account::store(), &a.uuid) })).collect::<Vec<_>>(),
                     "plays_as": accounts.selected().map(|a| a.name.clone()),
                     "sign_in_configured": account::client_id().is_some(),
                     // Sign-ins outlast the launcher: in the keychain, or in the secrets file
@@ -212,6 +213,7 @@ impl Session {
                     "secrets_file": account::in_secrets_file(),
                     // Play needs an account that owns the game (the owner gate).
                     "owner": accounts.has_owner(account::store()),
+                    "can_play": accounts.can_play(account::store()),
                     "sign_in": sign_in,
                 }))
                 .unwrap())

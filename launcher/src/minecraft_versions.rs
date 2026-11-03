@@ -1,7 +1,7 @@
 //! The versions of Minecraft: Java Edition a Java instance can play: Mojang's public version list
 //! (`version_manifest_v2.json`, the one the official launcher reads), kept in the launcher's data
 //! folder so the list still shows offline. It names each version and where its JSON is; the game's
-//! files themselves are downloaded only for an account that owns the game (`mojang.rs`).
+//! files themselves are downloaded only after fresh provider authorization (`mojang.rs`).
 
 use serde::Serialize;
 use std::fs;

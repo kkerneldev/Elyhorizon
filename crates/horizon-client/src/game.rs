@@ -532,8 +532,7 @@ impl Options {
         else {
             return Ok(None);
         };
-        // The launcher's account: online-mode servers need it. A bad file
-        // only leaves the game offline.
+        // An explicit account handoff must not silently become another identity.
         let session = if o.session_stdin {
             let mut text = String::new();
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
@@ -555,7 +554,12 @@ impl Options {
                 horizon_client::auth::prepare_chat_keys(true);
             }
             Ok(None) => {}
-            Err(e) => eprintln!("Horizon: not signed in: {e}"),
+            Err(e) => {
+                return Err(launch_api::UsageError(format!(
+                    "Could not load the signed-in account: {e}"
+                ))
+                .into());
+            }
         }
         if let Some(dir) = o.game_dir.take() {
             // Paths given on the command line stay relative to where the game was started.

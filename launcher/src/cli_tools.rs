@@ -25,6 +25,8 @@ const NOT_TOOLS: &[&str] = &[
     "account sign-in",
     "account list",
     "account session",
+    // App credentials are entered by the launcher owner, never through an agent tool.
+    "account ely-configure",
 ];
 
 /// Commands that delete the player's things: their tools need `confirm: true`.

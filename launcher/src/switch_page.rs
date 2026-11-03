@@ -12,7 +12,10 @@ impl Launcher {
                 self.accounts
                     .selected()
                     .map_or_else(String::new, |a| a.name.clone()),
-                tr("Microsoft account"),
+                tr(self
+                    .accounts
+                    .selected()
+                    .map_or("Microsoft account", account::Account::provider_label)),
             ),
             Player::Offline(name) => (name, tr("Offline")),
             Player::GameName => (
@@ -28,7 +31,10 @@ impl Launcher {
             .play_as_with(account::store(), who, self.settings.dev_offline)
             .and_then(|()| accounts.save());
         match done {
-            Ok(()) => self.accounts = accounts,
+            Ok(()) => {
+                self.owner = Some(accounts.can_play(account::store()));
+                self.accounts = accounts;
+            }
             Err(e) => self.sign_in_state = Some(SignInState::Done(Err(e))),
         }
         self.account_menu = false;
@@ -44,7 +50,7 @@ impl Launcher {
                 (
                     Player::Microsoft(a.uuid.clone()),
                     a.name.clone(),
-                    tr("Microsoft"),
+                    tr(a.provider_label()),
                 )
             })
             .collect();

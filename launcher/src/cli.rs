@@ -1,7 +1,7 @@
 //! `horizon-launcher <subcommand>`: the same steps as the window, from a terminal. Every
 //! command goes through `backend`; this file only parses arguments and prints.
 use clap::{Parser, Subcommand};
-use horizon_launcher::account::{self, Accounts};
+use horizon_launcher::account::{self, Accounts, SignIn, SignInState};
 use horizon_launcher::backend::{self, Release};
 use horizon_launcher::build_import;
 use horizon_launcher::github_mods;
@@ -106,6 +106,11 @@ enum ServersCmd {
 
 #[derive(Subcommand)]
 enum AccountCmd {
+    /// Configure this launcher's Ely.by OAuth app in the OS keychain. Read JSON containing
+    /// client_id, client_secret and optional redirect_uri from stdin; never put secrets in arguments.
+    ElyConfigure,
+    /// Sign in to Ely.by in your browser; passwords and two-factor codes stay on Ely.by.
+    ElySignIn,
     /// The signed-in accounts and which one plays
     List,
     /// Sign in with a Microsoft account in your browser (device code). Play needs one that owns
@@ -823,7 +828,7 @@ enum Cmd {
     Notes { tag: Option<String> },
     /// Show the Discord, sponsor and website links
     Links,
-    /// Microsoft accounts: list them (the default), sign in, sign out, or pick the one that plays
+    /// Microsoft and Ely.by accounts: list them, sign in, sign out, or choose who plays
     Account {
         #[command(subcommand)]
         action: Option<AccountCmd>,
@@ -1850,11 +1855,24 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
             .ok_or_else(|| format!("No signed-in account {who}. See `horizon-launcher account`."))
     };
     match action {
+        AccountCmd::ElyConfigure => {
+            let mut input = String::new();
+            std::io::stdin()
+                .read_line(&mut input)
+                .map_err(|_| tr(account::ely::oauth::NOT_CONFIGURED))?;
+            let id = account::ely::oauth::configure(&input)?;
+            if as_json {
+                json(serde_json::json!({"configured": true, "client_id": id}));
+            } else {
+                println!("Ely.by: {id}");
+            }
+        }
         AccountCmd::List => {
             if as_json {
                 json(serde_json::json!({
                     "accounts": accounts.accounts.iter().map(|a| serde_json::json!({
                         "name": a.name, "uuid": a.uuid,
+                        "profile_uuid": a.profile_uuid(), "provider": if a.is_ely() { "elyby" } else { "microsoft" },
                         "selected": accounts.selected.as_ref() == Some(&a.uuid),
                         "authentication": account::session::status(account::store(), &a.uuid),
                     })).collect::<Vec<_>>(),
@@ -1864,6 +1882,7 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                     })).collect::<Vec<_>>(),
                     "sign_in_configured": account::client_id().is_some(),
                     "owner": accounts.has_owner(account::store()),
+                    "can_play": accounts.can_play(account::store()),
                 }));
             } else if accounts.accounts.is_empty() && accounts.offline.is_empty() {
                 println!(
@@ -1889,7 +1908,7 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                         "Playing offline as the game's own name (`account select NAME` to switch)."
                     );
                 }
-                if !accounts.has_owner(account::store()) {
+                if !accounts.can_play(account::store()) {
                     println!("{}.", account::NEEDS_OWNER);
                 }
             }
@@ -1913,8 +1932,44 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                 (Err(status), false) => return Err(status.message),
             }
         }
+        AccountCmd::ElySignIn => {
+            let sign_in = SignIn::start_ely(None);
+            let mut shown = false;
+            let account = loop {
+                match sign_in.state() {
+                    SignInState::Browser(url) if !shown => {
+                        shown = true;
+                        if as_json {
+                            json(serde_json::json!({"link": url}));
+                        } else {
+                            eprintln!(
+                                "{}",
+                                trf(
+                                    "Open {link} in your browser to sign in to Ely.by.",
+                                    &[("link", &url)]
+                                )
+                            );
+                        }
+                    }
+                    SignInState::Done(result) => break result?,
+                    _ => {}
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            };
+            if as_json {
+                json(serde_json::json!({"signed_in": account.uuid, "provider": "elyby"}));
+            } else {
+                println!(
+                    "{}",
+                    horizon_launcher::i18n::trf("Signed in as {name}.", &[("name", &account.name)])
+                );
+            }
+        }
         AccountCmd::SignIn { target: Some(who) } => {
             let a = find(&accounts, &who)?;
+            if a.is_ely() {
+                return Err(tr("Use account ely-sign-in to sign in to Ely.by again.").into());
+            }
             let sign_in = account::SignIn::start_for(a.clone());
             let mut shown = false;
             let signed_in = loop {

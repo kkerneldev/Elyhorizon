@@ -19,6 +19,7 @@ fn under(base: &Path, rel: &str) -> PathBuf {
 
 fn player() -> Player {
     Player {
+        ely: false,
         name: "Notch".into(),
         uuid: "069a79f444e94726a5befca90e38aaf5".into(),
         token: "mc-token".into(),
@@ -30,6 +31,40 @@ fn args(cmd: &Command) -> Vec<String> {
     cmd.get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect()
+}
+
+#[test]
+fn ely_java_sessions_use_yggdrasil_and_keep_agent_paths_with_spaces_intact() {
+    let dir = scratch("ely-agent");
+    let (mc, game, natives) = (dir.join("mc"), dir.join("game"), dir.join("natives"));
+    let java = dir.join("java");
+    let p = Player {
+        ely: true,
+        xuid: String::new(),
+        ..player()
+    };
+    let agent = "-javaagent:C:/A folder/authlib-injector.jar=ely.by".to_owned();
+    let extra = vec![agent.clone()];
+    let command = command(
+        &modern(),
+        &Launch {
+            minecraft: &mc,
+            game_dir: &game,
+            natives: &natives,
+            java: &java,
+            memory_mb: 2048,
+            jvm_args: &extra,
+            player: &p,
+            os: "windows",
+            window: None,
+            server: None,
+        },
+    )
+    .unwrap();
+    let arguments = args(&command);
+    assert!(arguments.windows(2).any(|a| a == ["--userType", "mojang"]));
+    assert!(arguments.contains(&agent));
+    assert!(!format!("{p:?}").contains("mc-token"));
 }
 
 fn modern() -> Value {

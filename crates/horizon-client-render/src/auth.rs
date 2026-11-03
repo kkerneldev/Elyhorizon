@@ -20,6 +20,7 @@ pub struct AuthSession {
     pub uuid: u128,
     pub xuid: Option<String>,
     access_token: String,
+    ely: bool,
 }
 impl std::fmt::Debug for AuthSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -40,6 +41,9 @@ pub fn parse_uuid(text: &str) -> Option<u128> {
 }
 
 impl AuthSession {
+    pub fn is_ely(&self) -> bool {
+        self.ely
+    }
     /// For tests and harnesses.
     pub fn new(name: &str, uuid: u128, access_token: &str) -> Self {
         Self {
@@ -47,6 +51,7 @@ impl AuthSession {
             uuid,
             xuid: None,
             access_token: access_token.to_owned(),
+            ely: false,
         }
     }
     /// The session file's JSON: {"name", "uuid", "access_token", "user_type": "msa", "xuid"}.
@@ -64,14 +69,15 @@ impl AuthSession {
         let access_token = field("access_token")
             .filter(|t| !t.is_empty())
             .ok_or("the session has no access token")?;
-        if field("user_type").is_some_and(|t| t != "msa") {
-            return Err("the session is not a Microsoft account session".into());
+        if field("user_type").is_some_and(|t| t != "msa" && t != "elyby") {
+            return Err("the session uses an unsupported account provider".into());
         }
         Ok(Self {
             name: name.to_owned(),
             uuid,
             xuid: field("xuid").map(str::to_owned),
             access_token: access_token.to_owned(),
+            ely: field("user_type") == Some("elyby"),
         })
     }
     /// Read the session file the launcher wrote and delete it at once. It
@@ -180,6 +186,13 @@ fn agent() -> ureq::Agent {
 
 /// The discovery document, fetched once per game (a failure is retried next time).
 pub(crate) fn discovery() -> Result<Arc<serde_json::Value>, JoinError> {
+    if using_ely() {
+        return Ok(Arc::new(ely_discovery()));
+    }
+    microsoft_discovery()
+}
+
+fn microsoft_discovery() -> Result<Arc<serde_json::Value>, JoinError> {
     static CACHE: Mutex<Option<Arc<serde_json::Value>>> = Mutex::new(None);
     if let Some(d) = CACHE.lock().unwrap().clone() {
         return Ok(d);
@@ -197,6 +210,25 @@ pub(crate) fn discovery() -> Result<Arc<serde_json::Value>, JoinError> {
     Ok(doc)
 }
 
+/// A server must opt into Ely explicitly; never fall back between identity providers.
+pub fn using_ely() -> bool {
+    current().map_or_else(
+        || std::env::var("HORIZON_AUTH_PROVIDER").is_ok_and(|v| v == "elyby"),
+        |s| s.ely,
+    )
+}
+
+fn ely_discovery() -> serde_json::Value {
+    serde_json::json!({"discovery": {
+        "session": {"endpoints": {
+            "join": {"uri": "https://authserver.ely.by/session/join"},
+            "verify": {"uri": "https://authserver.ely.by/session/hasJoined"},
+            "getProfileById": {"uri": "https://authserver.ely.by/session/profile/{profileId}"}
+        }},
+        "profiles": {"endpoints": {"getByName": {"uri": "https://authserver.ely.by/api/users/profiles/minecraft/{name}"}}}
+    }})
+}
+
 /// MinecraftServicesDiscoveryService.getUrl(service, endpoint).
 pub fn endpoint(doc: &serde_json::Value, service: &str, name: &str) -> Option<String> {
     doc.pointer(&format!("/discovery/{service}/endpoints/{name}/uri"))
@@ -210,8 +242,11 @@ pub fn endpoint(doc: &serde_json::Value, service: &str, name: &str) -> Option<St
 /// attributes call falls back to the offline properties, a failed profile call
 /// to no actions, as vanilla does. Blocks: call it off the main thread.
 pub fn fetch_account_status(session: &AuthSession) -> crate::ban_notice::AccountStatus {
+    if session.ely {
+        return crate::ban_notice::AccountStatus::default();
+    }
     use crate::ban_notice::{AccountStatus, parse_profile_actions, parse_properties};
-    let Ok(doc) = discovery() else {
+    let Ok(doc) = microsoft_discovery() else {
         return AccountStatus::default();
     };
     let properties = endpoint(&doc, "player", "getAttributes")
@@ -281,8 +316,12 @@ pub fn join_server(session: &AuthSession, server_hash: &str) -> Result<(), JoinE
 }
 
 fn join_server_once(session: &AuthSession, server_hash: &str) -> Result<(), JoinError> {
-    let doc = discovery()?;
-    let url = endpoint(&doc, "session", "join").ok_or(JoinError::Unavailable)?;
+    let url = if session.ely {
+        "https://authserver.ely.by/session/join".to_owned()
+    } else {
+        endpoint(microsoft_discovery()?.as_ref(), "session", "join")
+            .ok_or(JoinError::Unavailable)?
+    };
     match agent()
         .post(&url)
         .set("Content-Type", "application/json; charset=utf-8")
@@ -403,7 +442,10 @@ pub fn parse_certificates(body: &str) -> Option<ChatKeyPair> {
 /// UserApiService.getKeyPair: the certificates endpoint, POSTed with the
 /// access token.
 pub fn fetch_chat_keys(session: &AuthSession) -> Result<ChatKeyPair, JoinError> {
-    let doc = discovery()?;
+    if session.ely {
+        return Err(JoinError::Unavailable);
+    }
+    let doc = microsoft_discovery()?;
     let url = endpoint(&doc, "player", "getCertificates").ok_or(JoinError::Unavailable)?;
     let body = match agent()
         .post(&url)
@@ -449,6 +491,9 @@ pub fn prepare_chat_keys(now: bool) {
     let Some(session) = current() else {
         return;
     };
+    if session.ely {
+        return;
+    }
     let mut keys = CHAT_KEYS.lock().unwrap();
     let instant = std::time::Instant::now();
     if keys.fetching || !now && keys.next_try.is_some_and(|t| instant < t) {
@@ -497,6 +542,29 @@ const MINECRAFT_PROFILE: &str = "https://api.minecraftservices.com/minecraft/pro
 /// Single-player and integrated servers often send no `textures` property, or
 /// one without the equipped cape; the client asks the profile endpoint once.
 pub fn own_textures(session: &AuthSession) -> Option<crate::skins::Textures> {
+    if session.ely {
+        let body = agent()
+            .get(&format!(
+                "https://authserver.ely.by/session/profile/{:032x}",
+                session.uuid
+            ))
+            .call()
+            .ok()?
+            .into_string()
+            .ok()?;
+        let profile: serde_json::Value = serde_json::from_str(&body).ok()?;
+        let properties = profile.get("properties")?.as_array()?;
+        let value = properties
+            .iter()
+            .find(|p| p.get("name").and_then(|n| n.as_str()) == Some("textures"))?
+            .get("value")?
+            .as_str()?;
+        return Some(crate::skins::unpack(
+            value,
+            crate::skins::Signature::Unsigned,
+            &crate::skins::ELY_TEXTURE_URIS,
+        ));
+    }
     let response = agent()
         .get(MINECRAFT_PROFILE)
         .set("Authorization", &format!("Bearer {}", session.access_token))
@@ -594,6 +662,63 @@ pub fn parse_joined(body: &str) -> Option<JoinedProfile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "contacts the public Ely.by skin service"]
+    fn ely_live_skin_reaches_the_game_texture_upload_queue() {
+        use crate::skins::{Download, Downloader, Kind};
+        let session = AuthSession::parse(r#"{"name":"ErickSkrauch","uuid":"ffc8fdc95824509e8a57c99b940fb996","access_token":"unused-public-profile-probe","user_type":"elyby"}"#).unwrap();
+        let textures = own_textures(&session).expect("Ely public profile");
+        let url = textures.skin.as_deref().expect("Ely public skin URL");
+        let root =
+            std::env::temp_dir().join(format!("horizon-live-ely-skin-{}", std::process::id()));
+        let mut downloads = Downloader::new(root.clone());
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match downloads.state(Kind::Skin, url) {
+                Download::Ready => break,
+                Download::Failed => panic!("Ely skin did not decode into game pixels"),
+                Download::Pending if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                Download::Pending => panic!("Ely skin download timed out"),
+            }
+        }
+        let location =
+            crate::skins::lookup(&textures, false, |kind, url| downloads.state(kind, url))
+                .expect("local Ely skin lookup");
+        let ready = downloads.take_ready();
+        assert!(
+            ready
+                .iter()
+                .any(|(id, rgba)| id == &location && rgba.len() == 64 * 64 * 4)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ely_session_handoff_keeps_the_real_uuid_and_does_not_expose_its_token() {
+        let session = AuthSession::parse(r#"{"name":"ElyPlayer","uuid":"ffc8fdc95824509e8a57c99b940fb996","access_token":"ely-secret","user_type":"elyby"}"#).unwrap();
+        assert!(session.is_ely());
+        assert_eq!(session.name, "ElyPlayer");
+        let body: serde_json::Value =
+            serde_json::from_str(&join_request(&session, "-1234")).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"accessToken": "ely-secret", "selectedProfile": "ffc8fdc95824509e8a57c99b940fb996", "serverId": "-1234"})
+        );
+        assert!(!format!("{session:?}").contains("ely-secret"));
+        let doc = ely_discovery();
+        assert_eq!(
+            endpoint(&doc, "session", "join").as_deref(),
+            Some("https://authserver.ely.by/session/join")
+        );
+        assert_eq!(
+            endpoint(&doc, "session", "verify").as_deref(),
+            Some("https://authserver.ely.by/session/hasJoined")
+        );
+        assert!(endpoint(&doc, "player", "getCertificates").is_none());
+    }
 
     const UUID: u128 = 0x069a79f444e94726a5befca90e38aaf5;
 
