@@ -1,0 +1,172 @@
+name: Elyhorizon Windows release
+
+on:
+  push:
+    tags: ['elyhorizon-v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, for example 0.2.1 or 0.2.1-beta.1'
+        required: true
+        type: string
+      publish:
+        description: Publish to GitHub Releases (otherwise build an Actions artifact only)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: elyhorizon-${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+      HORIZON_TELEMETRY_URL: 'off'
+      HORIZON_LAUNCHER_NO_SELF_UPDATE: '1'
+      HORIZON_NO_AUDIO: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Version and isolated test homes
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          $version = if ($env:GITHUB_EVENT_NAME -eq 'push') {
+            $env:GITHUB_REF_NAME -replace '^elyhorizon-v', ''
+          } else { $env:INPUT_VERSION }
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$') {
+            throw 'Expected a version such as 0.2.1 or 0.2.1-beta.1'
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=elyhorizon-v$version" >> $env:GITHUB_OUTPUT
+          "commit=$(git rev-parse HEAD)" >> $env:GITHUB_OUTPUT
+          "HORIZON_LAUNCHER_VERSION=$version" >> $env:GITHUB_ENV
+          "HORIZON_LAUNCHER_TAG=elyhorizon-v$version" >> $env:GITHUB_ENV
+          "HORIZON_VERSION=$version" >> $env:GITHUB_ENV
+          $scratch = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString('N'))
+          foreach ($key in @('HORIZON_HOME', 'HORIZON_LAUNCHER_HOME', 'XDG_DATA_HOME',
+            'XDG_CONFIG_HOME', 'HORIZON_LAUNCHER_TRASH', 'HORIZON_LAUNCHER_CLIPBOARD',
+            'HORIZON_LAUNCHER_DESKTOP')) {
+            $dir = Join-Path $scratch $key
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            "$key=$dir" >> $env:GITHUB_ENV
+          }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            launcher -> target
+          shared-key: elyhorizon-windows-release
+      - name: Check public files
+        run: python tools/check_public_tree.py
+      - name: Test launcher
+        run: cargo test --manifest-path launcher/Cargo.toml --release --locked --lib --bins
+      - name: Test game authentication
+        run: cargo test --locked -p horizon-client-render --no-default-features --lib auth::tests
+      - name: Build launcher
+        run: cargo build --manifest-path launcher/Cargo.toml --release --locked --bin horizon-launcher
+      - name: Build matching Horizon client
+        run: cargo build --release --locked -p horizon-client --bin horizon-client
+      - name: Check Windows runtime dependencies
+        run: |
+          python tools/check_imports.py launcher/target/release/horizon-launcher.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/check_imports.py target/release/horizon-client.exe
+      - name: Package launcher and client together
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $folder = 'dist/Elyhorizon'
+          New-Item -ItemType Directory -Path $folder -Force | Out-Null
+          Copy-Item launcher/target/release/horizon-launcher.exe $folder
+          Copy-Item target/release/horizon-client.exe $folder
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, docs/elyby-account.md $folder
+          Copy-Item packaging/windows/elyhorizon-readme.txt "$folder/README.txt"
+          $archive = "Elyhorizon-$env:VERSION-windows-x64.zip"
+          Compress-Archive -Path $folder -DestinationPath "dist/$archive"
+          $hash = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $archive" | Set-Content -Encoding ascii dist/SHA256SUMS
+          "### Windows x64 bundle: $archive" >> $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: elyhorizon-windows-x64
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: build
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.build.outputs.tag }}
+      VERSION: ${{ needs.build.outputs.version }}
+      COMMIT: ${{ needs.build.outputs.commit }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: elyhorizon-windows-x64
+          path: dist
+      - name: Verify archive checksum
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS
+      - name: Create or verify the release tag
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = process.env.TAG;
+            const sha = process.env.COMMIT;
+            try {
+              await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.git.createRef({ owner, repo, ref: `refs/tags/${tag}`, sha });
+            }
+            const commit = await github.rest.repos.getCommit({ owner, repo, ref: tag });
+            if (commit.data.sha !== sha) {
+              throw new Error('The release tag points to another commit; choose a new version.');
+            }
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'NOTES'
+          Windows x64: download the ZIP and extract the entire Elyhorizon folder.
+          Keep horizon-launcher.exe and horizon-client.exe together, then start horizon-launcher.exe.
+
+          Includes the matching Horizon client with Ely.by account and skin support.
+          OAuth application credentials are configured separately; none are included in the archive.
+          SHA256SUMS contains the archive checksum. Minecraft game files are downloaded or prepared at runtime.
+          NOTES
+          options=(--latest=false)
+          if [[ "$VERSION" == *-* ]]; then options+=(--prerelease); fi
+          gh release create "$TAG" dist/*.zip dist/SHA256SUMS --verify-tag \
+            --title "Elyhorizon $VERSION" --notes-file notes.md --draft "${options[@]}"
+          gh release edit "$TAG" --draft=false "${options[@]}"

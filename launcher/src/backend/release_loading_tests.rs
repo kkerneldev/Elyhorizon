@@ -120,7 +120,10 @@ fn publish_games_before_older_launcher_fallback() {
     )
     .unwrap();
     assert_eq!(*events.borrow(), ["releases", "fallback", "fallback"]);
-    assert_eq!(result.launcher.is_some(), LAUNCHER_ASSET.is_some());
+    assert_eq!(
+        result.launcher.is_some(),
+        LAUNCHER_ASSET.is_some() && !own_tag().starts_with("elyhorizon-v")
+    );
 }
 
 #[test]

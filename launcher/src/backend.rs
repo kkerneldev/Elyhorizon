@@ -196,6 +196,7 @@ pub fn is_game_tag(tag: &str) -> bool {
 pub fn launcher_version(tag: &str) -> Option<&str> {
     tag.strip_prefix(LAUNCHER_TAG_PREFIX)
         .or_else(|| tag.strip_prefix(OLD_LAUNCHER_TAG_PREFIX))
+        .or_else(|| tag.strip_prefix("elyhorizon-v"))
         .filter(|v| v.starts_with(|c: char| c.is_ascii_digit()))
 }
 
@@ -2604,6 +2605,11 @@ pub fn launcher_update(releases: &[Release]) -> Option<Release> {
 }
 
 fn launcher_update_from(releases: &[Release], own: &str) -> Option<Release> {
+    // Elyhorizon bundles its own game and account support. The upstream update
+    // feed must not replace that launcher with a different distribution.
+    if own.starts_with("elyhorizon-v") {
+        return None;
+    }
     releases
         .iter()
         .find(|r| r.asset.is_some())
@@ -4201,6 +4207,21 @@ pub fn {f}("
         );
     }
 
+    #[test]
+    fn an_elyhorizon_release_keeps_its_distribution_when_upstream_updates() {
+        let upstream = Release {
+            tag: "launcher@99.0.0".into(),
+            name: String::new(),
+            body: String::new(),
+            date: String::new(),
+            asset: Some(("https://example.com/launcher.zip".into(), 1)),
+            prerelease: false,
+            nightly: None,
+        };
+        assert_eq!(launcher_version("elyhorizon-v0.2.1"), Some("0.2.1"));
+        assert!(launcher_update_from(&[upstream], "elyhorizon-v0.2.1").is_none());
+    }
+
     /// The update path to 0.2 (docs/versioning.md): launchers from before it take the last
     /// `launcher-v` release, which takes every `launcher@` one.
     #[test]
@@ -4443,7 +4464,7 @@ pub fn {f}("
         );
         assert!(horizon_update(&releases, &["v2026.10.13".into()]).is_none());
         assert!(launcher_update(&[r("launcher-v0.0.1")]).is_none());
-        assert!(launcher_update(&[r("launcher@99.0.0")]).is_some());
+        assert!(launcher_update_from(&[r("launcher@99.0.0")], "launcher@0.2.0").is_some());
         assert!(launcher_update_from(&[r("launcher-v99.0.0")], "launcher-v0.16.0").is_some());
         let installed = ["v2026.10.12".to_string(), "v2026.10.1".to_string()];
         assert!(select_after_update(Some("v2026.10.12"), &installed));

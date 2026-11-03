@@ -64,6 +64,9 @@ Imported and native-mod builds retain their own executable. An upstream client
 without Ely support cannot read an Ely session. Updated Horizon refuses a bad
 session handoff instead of silently starting with a generated offline name.
 
+To build and publish the Windows launcher and matching client from your fork,
+use the [Elyhorizon GitHub Actions release workflow](elyhorizon-releases.md).
+
 ## Accounts, servers and CLI
 
 The account switcher supports Microsoft and Ely.by together. `accounts.json`
