@@ -1,116 +1,117 @@
+<p align="center"><strong>English</strong> · <a href="README.ru.md">Русский</a></p>
+
 <p align="center">
-  <a href="https://github.com/horizon-rust/horizon"><img src="docs/media/brand/icon.svg" alt="Логотип Horizon" width="104" height="104"></a>
+  <a href="https://github.com/horizon-rust/horizon"><img src="docs/media/brand/icon.svg" alt="Horizon logo" width="104" height="104"></a>
   &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://ely.by"><img src="docs/media/elyhorizon/elyby-logo.png" alt="Логотип Ely.by" width="104" height="104"></a>
+  <a href="https://ely.by"><img src="docs/media/elyhorizon/elyby-logo.png" alt="Ely.by logo" width="104" height="104"></a>
 </p>
 
 <h1 align="center">Elyhorizon</h1>
 
 <p align="center">
-  <b>Horizon с аккаунтами Ely.by и своим установщиком для Windows.</b><br>
-  Независимый форк <a href="https://github.com/horizon-rust/horizon">Horizon</a> — клиента Minecraft: Java Edition 26.3, написанного на Rust.
+  <b>Horizon with Ely.by accounts and its own Windows installer.</b><br>
+  An independent fork of <a href="https://github.com/horizon-rust/horizon">Horizon</a>, a Minecraft: Java Edition 26.3 client written in Rust.
 </p>
 
 <p align="center">
-  <a href="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml"><img src="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml/badge.svg" alt="Сборка Elyhorizon"></a>
+  <a href="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml"><img src="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml/badge.svg" alt="Elyhorizon build"></a>
   <img src="https://img.shields.io/badge/Windows-x64-5b3fd6" alt="Windows x64">
-  <img src="https://img.shields.io/badge/Ely.by-Browser%20OAuth-208260" alt="Вход Ely.by через браузер">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-5b3fd6" alt="Лицензия MIT"></a>
+  <img src="https://img.shields.io/badge/Ely.by-Browser%20OAuth-208260" alt="Ely.by sign-in through your browser">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-5b3fd6" alt="MIT license"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/kkerneldev/Elyhorizon/releases"><b>Скачать установщик</b></a> ·
-  <a href="docs/elyby-account.md"><b>Настройка Ely.by</b></a> ·
-  <a href="docs/elyhorizon-releases.md"><b>Сборка релиза</b></a> ·
-  <a href="https://github.com/kkerneldev/Elyhorizon/issues"><b>Сообщить об ошибке</b></a> ·
-  <a href="https://github.com/horizon-rust/horizon"><b>Оригинальный Horizon</b></a>
+  <a href="https://github.com/kkerneldev/Elyhorizon/releases"><b>Download installer</b></a> ·
+  <a href="docs/elyby-account.md"><b>Ely.by setup</b></a> ·
+  <a href="docs/elyhorizon-releases.md"><b>Build a release</b></a> ·
+  <a href="https://github.com/kkerneldev/Elyhorizon/issues"><b>Report an issue</b></a> ·
+  <a href="https://github.com/horizon-rust/horizon"><b>Original Horizon</b></a>
 </p>
 
-## Что это за форк
+## About this fork
 
-**Elyhorizon — отдельная сборка Horizon с интеграцией Ely.by.** В основе остаётся
-исходный Rust-клиент Horizon. Этот форк добавляет вход в аккаунт Ely.by через
-браузер, передачу ника и UUID в игру, загрузку скинов и Windows-установщик, который
-ставит лаунчер вместе с подходящей версией клиента.
+**Elyhorizon is a separate Horizon distribution with Ely.by integration.** It is
+built on the original Horizon Rust client. This fork adds browser sign-in with
+Ely.by, passes your account name and UUID to the game, loads skins, and provides
+a Windows installer that installs the launcher alongside its matching client.
 
-Проект развивается независимо от команд Horizon и Ely.by. Логотипы обозначают
-проекты, на которых основана интеграция; они не означают официальное партнёрство.
+This project is developed independently of the Horizon and Ely.by teams. The
+logos identify the projects behind the integration and do not imply an official
+partnership.
 
-| Возможность | Что есть в Elyhorizon |
+| Feature | What Elyhorizon provides |
 | --- | --- |
-| Аккаунты Ely.by | Вход через системный браузер, выбор аккаунта и обновление сессии |
-| Ник и скин | Данные выбранного аккаунта передаются в Horizon; скины загружаются из Ely.by |
-| Minecraft Java | Для Java-запусков с Ely.by подключается authlib-injector |
-| Установка | Один установщик для лаунчера и Rust-клиента Horizon |
-| Портативный запуск | ZIP с обоими EXE для запуска без установки |
-| Сборка релизов | GitHub Actions собирает Windows x64, проверяет установку и публикует файлы |
+| Ely.by accounts | Sign in through your system browser, select an account, and refresh sessions |
+| Player name and skin | Pass the selected account to Horizon and load textures from Ely.by |
+| Minecraft Java | Use authlib-injector for Java instances launched with Ely.by |
+| Installation | One installer for the launcher and Horizon Rust client |
+| Portable launch | A ZIP containing both executables, with no installation required |
+| Release builds | GitHub Actions builds Windows x64, tests installation, and publishes the files |
 
-## Скачать и установить
+## Download and install
 
-1. Открой [Releases этого форка](https://github.com/kkerneldev/Elyhorizon/releases).
-2. Скачай **`Elyhorizon-<версия>-windows-x64-setup.exe`**.
-3. Запусти установщик, выбери папку и при желании добавь ярлык на рабочий стол.
-4. Открой **Elyhorizon** из меню «Пуск», добавь аккаунт Ely.by и выбери его перед запуском.
+1. Open [this fork's Releases](https://github.com/kkerneldev/Elyhorizon/releases).
+2. Download **`Elyhorizon-<version>-windows-x64-setup.exe`**.
+3. Run the installer, choose a folder, and optionally add a desktop shortcut.
+4. Open **Elyhorizon** from the Start menu, add your Ely.by account, and select it before playing.
 
-Установщик работает для текущего пользователя без прав администратора. Он ставит
-оба EXE рядом и добавляет удаление через список установленных приложений Windows.
-Понадобится Windows x64 и видеокарта, подходящая для Horizon.
+The installer runs for the current user without administrator access. It places
+both executables together and adds an uninstall entry to Windows Installed Apps.
+You need Windows x64 and a GPU suitable for Horizon.
 
-Для портативного запуска скачай `Elyhorizon-<версия>-windows-x64.zip`, распакуй
-**всю папку** и запусти `horizon-launcher.exe`. Файлы `horizon-launcher.exe` и
-`horizon-client.exe` должны оставаться рядом: так лаунчер сможет использовать
-клиент с поддержкой Ely.by. Импортированные сборки и сборки с нативными модами
-используют собственный исполняемый файл.
+For a portable setup, download `Elyhorizon-<version>-windows-x64.zip`, extract
+**the entire folder**, and run `horizon-launcher.exe`. Keep `horizon-launcher.exe`
+and `horizon-client.exe` together so the launcher can use the client with Ely.by
+support. Imported builds and builds with native mods use their own executable.
 
-Если файлов для скачивания ещё нет, сначала запусти
-[релизный workflow](docs/elyhorizon-releases.md) в своём GitHub-репозитории.
+If no downloads are available yet, run the
+[release workflow](docs/elyhorizon-releases.md) in your GitHub repository first.
 
-## Вход через Ely.by
+## Sign in with Ely.by
 
-Авторизация открывается на сайте Ely.by в твоём браузере. Пароль и код двухфакторной
-аутентификации вводятся на сайте; токены сохраняются в системном хранилище учётных
-данных.
+Authentication opens the Ely.by website in your browser. Enter your password and
+two-factor code on the website; tokens are saved in your system credential store.
 
-Для браузерного входа нужно один раз настроить OAuth-приложение на компьютере,
-где используется лаунчер. Секрет приложения не входит в релизный EXE и не
-переносится с другого компьютера автоматически.
-[Инструкция по настройке и командам аккаунта](docs/elyby-account.md).
+Browser sign-in requires a one-time OAuth application configuration on the
+computer running the launcher. The application secret is not included in the
+release executable and does not transfer automatically from another computer.
+See [account setup and commands](docs/elyby-account.md).
 
-Ely.by отвечает за аккаунты и текстуры. Файлы Minecraft, библиотеки и ресурсы
-загружаются из официальных источников либо берутся из существующей установки.
-Они не входят в установщик Elyhorizon.
+Ely.by provides accounts and textures. Minecraft files, libraries, and resources
+are downloaded from official sources or reused from an existing installation.
+They are not included in the Elyhorizon installer.
 
-Аккаунт Ely.by подходит для серверов, настроенных на авторизацию Ely.by.
-Доступ к серверам с авторизацией Microsoft зависит от требований самого сервера.
+Ely.by accounts work with servers configured for Ely.by authentication.
+Access to servers using Microsoft authentication depends on that server's requirements.
 
-## Как выглядит Horizon
+## A look at Horizon
 
-Скриншоты исходного Horizon показывают базовый интерфейс и игру, на которых
-построен этот форк.
+These upstream Horizon screenshots show the base interface and game on which
+this fork is built.
 
 <p align="center">
-  <img src="docs/media/launcher-play.webp" alt="Главная страница лаунчера Horizon" width="780">
+  <img src="docs/media/launcher-play.webp" alt="Horizon launcher home page" width="780">
 </p>
 
 <p align="center">
-  <img src="docs/media/sunset.webp" alt="Мир Minecraft в Rust-клиенте Horizon: закат над деревней" width="780">
+  <img src="docs/media/sunset.webp" alt="Sunset over a village in the Horizon Rust client" width="780">
 </p>
 
-## Своя сборка в GitHub Actions
+## Build a release with GitHub Actions
 
-Открой **Actions → Elyhorizon Windows release → Run workflow**, укажи новую
-версию, например `0.2.1`, и включи `publish`. Также можно отправить тег
+Open **Actions → Elyhorizon Windows release → Run workflow**, enter a new
+version such as `0.2.1`, and enable `publish`. You can also push a tag such as
 `elyhorizon-v0.2.1`.
 
-После успешной сборки в Releases появятся установщик, портативный ZIP и
-`SHA256SUMS`. Сам установщик проверяется в Actions: установка, совпадение хешей
-обоих EXE и удаление. Подробности — в
-[инструкции по релизам](docs/elyhorizon-releases.md).
+A successful build publishes the installer, portable ZIP, and `SHA256SUMS` to
+Releases. Actions tests the installer by installing it, checking the hashes of
+both executables, and uninstalling it. See the
+[release guide](docs/elyhorizon-releases.md) for details.
 
 ## Build from source
 
-Для разработки нужны Rust, Python 3.10+ и JDK 25. Подготовка игровых ресурсов
-описана в [документации клиента](docs/native-client.md) и
+Development requires Rust, Python 3.10+, and JDK 25. Game resource preparation is
+described in the [client documentation](docs/native-client.md) and
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```sh
@@ -120,39 +121,39 @@ cargo build --release --locked -p horizon-client --bin horizon-client
 cargo build --manifest-path launcher/Cargo.toml --release --locked --bin horizon-launcher
 ```
 
-Для установки с поддержкой Ely.by положи собранные `horizon-launcher.exe` и
-`horizon-client.exe` в одну папку. Подготовленные игровые файлы хранятся отдельно
-в игнорируемой `.local/`; их нельзя добавлять в репозиторий.
+Place the built `horizon-launcher.exe` and `horizon-client.exe` in the same folder
+to use Ely.by support. Prepared game files are stored separately in the ignored
+`.local/` directory; never add them to the repository.
 
-## Ошибки и участие
+## Issues and contributions
 
-Проблемы со входом Ely.by, установщиком и изменениями этого форка можно описать
-в [Issues Elyhorizon](https://github.com/kkerneldev/Elyhorizon/issues).
-Укажи версию сборки, действие, после которого возникает ошибка, и текст сообщения.
-Пароли, токены и секрет OAuth-приложения в отчёт не добавляй.
+Report problems with Ely.by sign-in, the installer, or changes in this fork in
+[Elyhorizon Issues](https://github.com/kkerneldev/Elyhorizon/issues).
+Include the build version, the action that triggered the issue, and the error
+message. Do not include passwords, tokens, or the OAuth application secret.
 
-Документация исходного движка: [Horizon](https://github.com/horizon-rust/horizon),
-[архитектура](docs/architecture.md), [моды](docs/mods.md),
-[серверы](docs/hosting.md), [управление через horizon-ctl](docs/agent-control.md).
+Upstream engine documentation: [Horizon](https://github.com/horizon-rust/horizon),
+[architecture](docs/architecture.md), [mods](docs/mods.md),
+[servers](docs/hosting.md), and [horizon-ctl control](docs/agent-control.md).
 
-## Авторы и лицензия
+## Credits and license
 
-- **Horizon** — исходный проект [Ludovic Marie](https://github.com/ludovic111) и [участников Horizon](https://github.com/horizon-rust/horizon/graphs/contributors).
-- **Elyhorizon** — [этот форк](https://github.com/kkerneldev/Elyhorizon), поддержка Ely.by и собственная Windows-сборка.
-- **Ely.by** — [сервис аккаунтов и скинов](https://ely.by), используемый интеграцией.
+- **Horizon** is the original project by [Ludovic Marie](https://github.com/ludovic111) and [Horizon contributors](https://github.com/horizon-rust/horizon/graphs/contributors).
+- **Elyhorizon** is [this fork](https://github.com/kkerneldev/Elyhorizon), adding Ely.by support and its own Windows distribution.
+- **Ely.by** is the [account and skin service](https://ely.by) used by the integration.
 
-Исходный код распространяется по [лицензии MIT](LICENSE); зависимости сохраняют
-свои лицензии ([уведомления](THIRD_PARTY_NOTICES.md)). Логотипы Horizon и Ely.by
-принадлежат соответствующим проектам; [источники изображений](docs/media/elyhorizon/README.md).
+Source code is distributed under the [MIT license](LICENSE); dependencies retain
+their own licenses ([notices](THIRD_PARTY_NOTICES.md)). Horizon and Ely.by logos
+belong to their respective projects; see [image sources](docs/media/elyhorizon/README.md).
 
-Elyhorizon не является официальным продуктом Minecraft и не связан с Mojang или
-Microsoft. Код и игровые ресурсы Minecraft не распространяются в этом репозитории.
+Elyhorizon is not an official Minecraft product and is not affiliated with Mojang
+or Microsoft. Minecraft code and game assets are not distributed in this repository.
 
 <details>
-<summary>Технический аудит исходного Horizon</summary>
+<summary>Upstream Horizon technical audit</summary>
 
-Ниже сохранён аудит upstream из исходного README. Дата проверки указана в самом
-отчёте; результаты относятся к его набору тестов, а не к каждому сценарию этого форка.
+The audit below is preserved from the upstream README. Its date is stated in the
+report; the results cover that test suite, not every scenario in this fork.
 
 <p>
   <img src="https://img.shields.io/badge/vanilla%20parity-100%25-F0795A" alt="Upstream vanilla parity 100% of audited tests">
