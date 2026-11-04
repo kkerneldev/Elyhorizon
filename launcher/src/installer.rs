@@ -532,9 +532,11 @@ mod tests {
         let link = dir.join("Horizon Launcher.lnk");
         write_link(&link, &exe).unwrap();
         // The bug this guards: a link whose target the shell read as empty, so a double click did nothing.
+        // Explorer can expand an 8.3 path from TEMP (RUNNER~1) to its long name.
+        // Compare the actual files, while still rejecting empty or missing targets.
         assert_eq!(
-            target_of(&link).to_lowercase(),
-            exe.to_string_lossy().to_lowercase()
+            fs::canonicalize(target_of(&link)).unwrap(),
+            fs::canonicalize(&exe).unwrap()
         );
         // The uninstaller finds its shortcuts by the program's path inside them.
         assert!(points_to(&link, &exe));
