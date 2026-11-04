@@ -103,14 +103,49 @@ jobs:
           Copy-Item packaging/windows/elyhorizon-readme.txt "$folder/README.txt"
           $archive = "Elyhorizon-$env:VERSION-windows-x64.zip"
           Compress-Archive -Path $folder -DestinationPath "dist/$archive"
-          $hash = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $archive" | Set-Content -Encoding ascii dist/SHA256SUMS
           "### Windows x64 bundle: $archive" >> $env:GITHUB_STEP_SUMMARY
+      - name: Build Elyhorizon installer
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+          if (!(Test-Path $compiler)) { throw 'Inno Setup 6 compiler is missing on this runner' }
+          $payload = (Resolve-Path dist/Elyhorizon).Path
+          $output = (Resolve-Path dist).Path
+          $numeric = ($env:VERSION -split '-')[0] + '.0'
+          & $compiler "/DAppVersion=$env:VERSION" "/DNumericVersion=$numeric" "/DPayloadDir=$payload" "/DBuildOutputDir=$output" packaging/windows/elyhorizon.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify installer and uninstaller
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $installed = Join-Path $env:RUNNER_TEMP ('elyhorizon-install-' + [guid]::NewGuid().ToString('N'))
+          $setup = (Resolve-Path "dist/Elyhorizon-$env:VERSION-windows-x64-setup.exe").Path
+          $process = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOICONS', '/TASKS=', "/DIR=`"$installed`"") -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
+          foreach ($name in @('horizon-launcher.exe', 'horizon-client.exe')) {
+            $expected = (Get-FileHash "dist/Elyhorizon/$name" -Algorithm SHA256).Hash
+            if ((Get-FileHash (Join-Path $installed $name) -Algorithm SHA256).Hash -ne $expected) {
+              throw "Installer did not install the matching $name"
+            }
+          }
+          $process = Start-Process -FilePath (Join-Path $installed 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Uninstaller failed: $($process.ExitCode)" }
+          foreach ($name in @('horizon-launcher.exe', 'horizon-client.exe')) {
+            if (Test-Path (Join-Path $installed $name)) { throw "Uninstaller left $name behind" }
+          }
+      - name: Checksum release files
+        run: |
+          Get-ChildItem dist -File | Where-Object { $_.Extension -in @('.zip', '.exe') } | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content -Encoding ascii dist/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: elyhorizon-windows-x64
           path: |
             dist/*.zip
+            dist/*-setup.exe
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
@@ -158,8 +193,10 @@ jobs:
         run: |
           set -euo pipefail
           cat > notes.md <<'NOTES'
-          Windows x64: download the ZIP and extract the entire Elyhorizon folder.
-          Keep horizon-launcher.exe and horizon-client.exe together, then start horizon-launcher.exe.
+          Windows x64: download the windows-x64-setup.exe installer and run it.
+          The installer installs Elyhorizon for your Windows account, adds a Start menu shortcut,
+          and includes both the launcher and matching Horizon client. Administrator access is not required.
+          A portable ZIP is also available; extract it and keep both executables together.
 
           Includes the matching Horizon client with Ely.by account and skin support.
           OAuth application credentials are configured separately; none are included in the archive.
@@ -167,6 +204,6 @@ jobs:
           NOTES
           options=(--latest=false)
           if [[ "$VERSION" == *-* ]]; then options+=(--prerelease); fi
-          gh release create "$TAG" dist/*.zip dist/SHA256SUMS --verify-tag \
+          gh release create "$TAG" dist/*.zip dist/*-setup.exe dist/SHA256SUMS --verify-tag \
             --title "Elyhorizon $VERSION" --notes-file notes.md --draft "${options[@]}"
           gh release edit "$TAG" --draft=false "${options[@]}"
