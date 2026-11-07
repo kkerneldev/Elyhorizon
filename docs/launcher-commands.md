@@ -129,9 +129,17 @@ MCP: `links`.
 
 ## `horizon-launcher account ely-configure`
 
-Configure this launcher's Ely.by OAuth app in the OS keychain. Read JSON containing client_id, client_secret and optional redirect_uri from stdin; never put secrets in arguments.
+Configure a public Ely.by Desktop client ID override. Read JSON containing client_id and optional redirect_uri from stdin. Client secrets are refused.
 
     horizon-launcher account ely-configure
+
+MCP: none: the player's switch.
+
+## `horizon-launcher account ely-status`
+
+Show public Ely.by configuration of this installed build; never print credentials.
+
+    horizon-launcher account ely-status
 
 MCP: none: the player's switch.
 

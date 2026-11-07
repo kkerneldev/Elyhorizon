@@ -34,6 +34,9 @@ jobs:
         shell: pwsh
     env:
       RUSTFLAGS: -C target-feature=+crt-static
+      # Public Desktop registration, compiled into the EXE; never provide a client secret.
+      HORIZON_ELY_CLIENT_ID: ${{ vars.HORIZON_ELY_CLIENT_ID }}
+      HORIZON_MSA_CLIENT_ID: ${{ vars.HORIZON_MSA_CLIENT_ID }}
       HORIZON_TELEMETRY_URL: 'off'
       HORIZON_LAUNCHER_NO_SELF_UPDATE: '1'
       HORIZON_NO_AUDIO: '1'
@@ -70,6 +73,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - name: Require a valid public Ely.by Desktop registration
+        run: python tools/check_ely_oauth.py
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -128,6 +133,16 @@ jobs:
             if ((Get-FileHash (Join-Path $installed $name) -Algorithm SHA256).Hash -ne $expected) {
               throw "Installer did not install the matching $name"
             }
+          }
+          # The installed EXE must work without the build job's environment or keychain.
+          $expectedClientId = $env:HORIZON_ELY_CLIENT_ID
+          Remove-Item Env:HORIZON_ELY_CLIENT_ID -ErrorAction SilentlyContinue
+          Remove-Item Env:HORIZON_ELY_CLIENT_SECRET -ErrorAction SilentlyContinue
+          Remove-Item Env:HORIZON_ELY_REDIRECT_URI -ErrorAction SilentlyContinue
+          $env:HORIZON_LAUNCHER_HOME = Join-Path $env:RUNNER_TEMP ('elyhorizon-clean-' + [guid]::NewGuid().ToString('N'))
+          $auth = & (Join-Path $installed 'horizon-launcher.exe') --json account ely-status | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $auth.client_id -ne $expectedClientId -or $auth.bundled_client_id -ne $expectedClientId -or $auth.flow -ne 'authorization_code_pkce' -or $auth.client_secret_required -ne $false) {
+            throw 'Installed launcher is missing its public PKCE configuration'
           }
           $process = Start-Process -FilePath (Join-Path $installed 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -WindowStyle Hidden -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Uninstaller failed: $($process.ExitCode)" }
@@ -199,7 +214,7 @@ jobs:
           A portable ZIP is also available; extract it and keep both executables together.
 
           Includes the matching Horizon client with Ely.by account and skin support.
-          OAuth application credentials are configured separately; none are included in the archive.
+          Browser sign-in uses public Desktop OAuth with S256 PKCE; no client secret is included or required.
           SHA256SUMS contains the archive checksum. Minecraft game files are downloaded or prepared at runtime.
           NOTES
           options=(--latest=false)

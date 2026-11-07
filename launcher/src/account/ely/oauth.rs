@@ -1,20 +1,21 @@
 //! Ely.by authorization-code flow. Browser credentials never enter the launcher.
-//! The documented provider requires a registered application and client secret.
+//! Public Desktop applications use S256 PKCE; no application secret is loaded or sent.
 use super::*;
+use base64::Engine;
+use sha2::{Digest, Sha256};
 use std::io::{BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Instant;
 use url::Url;
 
 const SCOPE: &str = "account_info offline_access minecraft_server_session";
-pub const NOT_CONFIGURED: &str = "Ely.by browser sign-in needs a registered Elyhorizon OAuth application. Configure HORIZON_ELY_CLIENT_ID and HORIZON_ELY_CLIENT_SECRET.";
+pub const NOT_CONFIGURED: &str = "This build has no Ely.by Desktop application ID. Install a release configured with HORIZON_ELY_CLIENT_ID.";
 const DEFAULT_REDIRECT: &str = "http://127.0.0.1:38467/oauth/ely";
 const APPLICATION_KEY: &str = "ely-oauth-application";
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Application {
     client_id: String,
-    client_secret: String,
     #[serde(default = "default_redirect")]
     redirect_uri: String,
 }
@@ -25,7 +26,6 @@ fn default_redirect() -> String {
 
 pub struct Config {
     client_id: String,
-    client_secret: String,
     redirect: Url,
     token_url: String,
     info_url: String,
@@ -33,17 +33,27 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Result<Self, String> {
-        Self::load_with(store(), &|key| std::env::var(key).ok())
+        Self::load_with(
+            store(),
+            &|key| std::env::var(key).ok(),
+            option_env!("HORIZON_ELY_CLIENT_ID"),
+        )
     }
 
     fn load_with(
         secrets: &dyn SecretStore,
         environment: &dyn Fn(&str) -> Option<String>,
+        bundled_id: Option<&str>,
     ) -> Result<Self, String> {
         let field = |key| environment(key).filter(|s| !s.trim().is_empty());
         let id = field("HORIZON_ELY_CLIENT_ID");
-        let secret = field("HORIZON_ELY_CLIENT_SECRET");
-        let saved: Option<Application> = if id.is_some() && secret.is_some() {
+        let id = id.or_else(|| {
+            bundled_id
+                .map(str::to_owned)
+                .filter(|s| !s.trim().is_empty())
+        });
+        // Release builds never need a developer's keychain configuration.
+        let saved: Option<Application> = if id.is_some() {
             None
         } else {
             secrets
@@ -56,16 +66,14 @@ impl Config {
         };
         let client_id = id
             .or_else(|| saved.as_ref().map(|a| a.client_id.clone()))
-            .ok_or_else(|| crate::i18n::tr(NOT_CONFIGURED).to_owned())?;
-        let client_secret = secret
-            .or_else(|| saved.as_ref().map(|a| a.client_secret.clone()))
+            .map(|id| id.trim().to_owned())
+            .filter(|id| !id.is_empty())
             .ok_or_else(|| crate::i18n::tr(NOT_CONFIGURED).to_owned())?;
         let redirect = field("HORIZON_ELY_REDIRECT_URI")
             .or_else(|| saved.as_ref().map(|a| a.redirect_uri.clone()))
             .unwrap_or_else(default_redirect);
         Ok(Self {
             client_id,
-            client_secret,
             redirect: parse_redirect(&redirect)?,
             token_url: "https://account.ely.by/api/oauth2/v1/token".into(),
             info_url: "https://account.ely.by/api/account/v1/info".into(),
@@ -73,8 +81,8 @@ impl Config {
     }
 }
 
-/// The CLI reads JSON on stdin so the secret never appears in process arguments.
-/// Application settings occupy their own keychain item, separate from player sessions.
+/// Optional development override; releases carry only their public Desktop client ID.
+/// The historical keychain record's client_secret field is ignored, never used.
 pub fn configure(input: &str) -> Result<String, String> {
     configure_with(store(), input)
 }
@@ -82,7 +90,11 @@ pub fn configure(input: &str) -> Result<String, String> {
 fn configure_with(secrets: &dyn SecretStore, input: &str) -> Result<String, String> {
     let invalid = || crate::i18n::tr(NOT_CONFIGURED).to_owned();
     let application: Application = serde_json::from_str(input).map_err(|_| invalid())?;
-    if application.client_id.trim().is_empty() || application.client_secret.trim().is_empty() {
+    if application.client_id.trim().is_empty()
+        || serde_json::from_str::<Value>(input)
+            .ok()
+            .is_some_and(|v| v.get("client_secret").is_some())
+    {
         return Err(invalid());
     }
     parse_redirect(&application.redirect_uri)?;
@@ -115,21 +127,37 @@ fn parse_redirect(value: &str) -> Result<Url, String> {
     Ok(url)
 }
 
+fn challenge(verifier: &str) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
+fn new_verifier() -> Result<String, String> {
+    let mut bytes = [0; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|_| crate::i18n::tr("Could not create a secure sign-in."))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
 pub struct BrowserFlow {
     config: Config,
     listener: TcpListener,
     state: String,
+    verifier: String,
 }
 
 impl BrowserFlow {
-    pub fn new(config: Config) -> Result<Self, String> {
-        let listener =
-            TcpListener::bind(("127.0.0.1", config.redirect.port().expect("validated port")))
-                .map_err(|_| {
-                    crate::i18n::tr(
-                "The Ely.by browser callback port is busy. Close another sign-in and retry.",
-            )
-                })?;
+    pub fn new(mut config: Config) -> Result<Self, String> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .map_err(|_| crate::i18n::tr("Could not start Ely.by browser sign-in."))?;
+        config
+            .redirect
+            .set_port(Some(
+                listener
+                    .local_addr()
+                    .map_err(|_| crate::i18n::tr("Could not start Ely.by browser sign-in."))?
+                    .port(),
+            ))
+            .expect("loopback URL");
         listener
             .set_nonblocking(true)
             .map_err(|_| crate::i18n::tr("Could not start Ely.by browser sign-in."))?;
@@ -140,6 +168,7 @@ impl BrowserFlow {
             config,
             listener,
             state: bytes.iter().map(|b| format!("{b:02x}")).collect(),
+            verifier: new_verifier()?,
         })
     }
 
@@ -149,6 +178,8 @@ impl BrowserFlow {
             .append_pair("client_id", &self.config.client_id)
             .append_pair("redirect_uri", self.config.redirect.as_str())
             .append_pair("response_type", "code")
+            .append_pair("code_challenge", &challenge(&self.verifier))
+            .append_pair("code_challenge_method", "S256")
             .append_pair("scope", SCOPE)
             .append_pair("state", &self.state)
             .append_pair("prompt", "select_account");
@@ -164,17 +195,22 @@ impl BrowserFlow {
         if cancelled() {
             return Err(crate::i18n::tr("Sign-in cancelled.").into());
         }
+        Ok(with_textures(AUTH_SERVER, self.exchange_code(&code)?))
+    }
+
+    fn exchange_code(&self, code: &str) -> Result<(Account, Secrets), String> {
         let (status, value) = token_request(
             &self.config,
             vec![
                 ("grant_type", "authorization_code"),
-                ("code", &code),
+                ("code", code),
+                ("code_verifier", &self.verifier),
                 ("redirect_uri", self.config.redirect.as_str()),
             ],
         )?;
         let secrets = tokens(status, &value, None)?;
         let account = profile(&self.config, &secrets.minecraft_token)?;
-        Ok(with_textures(AUTH_SERVER, (account, secrets)))
+        Ok((account, secrets))
     }
 
     fn wait_code(&self, cancelled: &dyn Fn() -> bool, timeout: Duration) -> Result<String, String> {
@@ -257,7 +293,7 @@ fn callback(stream: &mut TcpStream, redirect: &Url, state: &str) -> Callback {
             Some(first)
         }
     };
-    if only("state") != Some(state) {
+    if only("state") != Some(state) || only("iss") != Some("https://account.ely.by") {
         return Callback::Ignore;
     }
     if only("error").is_some() {
@@ -281,9 +317,9 @@ fn token_request<'a>(
     mut fields: Vec<(&'a str, &'a str)>,
 ) -> Result<(u16, Value), String> {
     fields.push(("client_id", &config.client_id));
-    fields.push(("client_secret", &config.client_secret));
+
     send(
-        request_to("POST", &config.token_url),
+        oauth_request("POST", &config.token_url),
         Some(Body::Form(fields)),
         "Ely.by",
     )
@@ -292,8 +328,31 @@ fn token_request<'a>(
     })
 }
 
+// Authorization codes, verifiers and bearer tokens must never follow HTTP redirects.
+fn oauth_request(method: &str, url: &str) -> ureq::Request {
+    crate::proxy::agent(
+        ureq::AgentBuilder::new()
+            .redirects(0)
+            .timeout(Duration::from_secs(20)),
+        url,
+    )
+    .build()
+    .request(method, url)
+}
+
+/// Public diagnostics for checking an installed release with an empty environment.
+pub fn status() -> Result<Value, String> {
+    let config = Config::load()?;
+    Ok(
+        json!({"client_id": config.client_id, "bundled_client_id": option_env!("HORIZON_ELY_CLIENT_ID"), "flow": "authorization_code_pkce", "code_challenge_method": "S256", "client_secret_required": false}),
+    )
+}
+
 fn tokens(status: u16, value: &Value, previous: Option<&Secrets>) -> Result<Secrets, String> {
     if status != 200 {
+        if value.get("error").and_then(Value::as_str) == Some("invalid_client") {
+            return Err(crate::i18n::tr("Ely.by rejected this application. The release must use a registered public Desktop application ID, not a Website application.").into());
+        }
         return Err(crate::i18n::tr(if matches!(status, 400 | 401 | 403) {
             EXPIRED
         } else {
@@ -315,8 +374,11 @@ fn tokens(status: u16, value: &Value, previous: Option<&Secrets>) -> Result<Secr
         .ok_or_else(malformed)?;
     let seconds = value
         .get("expires_in")
-        .and_then(Value::as_u64)
-        .filter(|s| *s > 0)
+        .and_then(Value::as_i64)
+        .filter(|s| *s >= -1)
+        // Ely's newer server can issue non-expiring sessions with a nonpositive
+        // advertised lifetime. Never extend trust locally: renew before play.
+        .map(|s| s.max(0) as u64)
         .ok_or_else(malformed)?;
     Ok(Secrets {
         ely: true,
@@ -332,7 +394,7 @@ fn tokens(status: u16, value: &Value, previous: Option<&Secrets>) -> Result<Secr
 
 fn profile(config: &Config, token: &str) -> Result<Account, String> {
     let (status, value) = send(
-        bearer(request_to("GET", &config.info_url), token),
+        bearer(oauth_request("GET", &config.info_url), token),
         None,
         "Ely.by",
     )?;
@@ -420,26 +482,73 @@ mod tests {
     }
 
     #[test]
+    fn release_configuration_needs_only_a_bundled_public_id_and_no_keychain() {
+        let store = MemoryStore::default();
+        assert!(Config::load_with(&store, &|_| None, None).is_err());
+        assert!(Config::load_with(&store, &|_| None, Some("  ")).is_err());
+        let config = Config::load_with(&store, &|_| None, Some("release-desktop-app")).unwrap();
+        assert_eq!(config.client_id, "release-desktop-app");
+        let config = Config::load_with(
+            &store,
+            &|key| (key == "HORIZON_ELY_CLIENT_SECRET").then(|| "must-be-ignored".into()),
+            Some("release-desktop-app"),
+        )
+        .unwrap();
+        assert_eq!(config.client_id, "release-desktop-app");
+        assert!(store.get(APPLICATION_KEY).unwrap().is_none());
+        store
+            .set(APPLICATION_KEY, "damaged legacy application record")
+            .unwrap();
+        assert_eq!(
+            Config::load_with(&store, &|_| None, Some("release-desktop-app"))
+                .unwrap()
+                .client_id,
+            "release-desktop-app"
+        );
+    }
+
+    #[test]
+    fn pkce_uses_the_rfc7636_s256_vector_and_independent_random_values() {
+        assert_eq!(
+            challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+        let a = BrowserFlow::new(config()).unwrap();
+        let b = BrowserFlow::new(config()).unwrap();
+        assert_ne!(a.verifier, b.verifier);
+        assert_ne!(a.state, b.state);
+        assert_ne!(a.verifier, a.state);
+        assert_eq!(a.verifier.len(), 43);
+        assert_ne!(a.config.redirect.port(), b.config.redirect.port());
+    }
+
+    #[test]
     fn application_configuration_survives_reloads_separately_from_player_accounts() {
         let store = AppStore::default();
-        let input = r#"{"client_id":"registered-app","client_secret":"stored-secret"}"#;
+        let input = r#"{"client_id":"registered-app"}"#;
         assert_eq!(configure_with(&store, input).unwrap(), "registered-app");
-        let loaded = Config::load_with(&store, &|_| None).unwrap();
+        let loaded = Config::load_with(&store, &|_| None, None).unwrap();
         assert_eq!(loaded.client_id, "registered-app");
-        assert_eq!(loaded.client_secret, "stored-secret");
         assert_eq!(loaded.redirect.as_str(), "http://127.0.0.1:38467/oauth/ely");
         assert!(Accounts::default().accounts.is_empty());
         assert!(!serde_json::to_string(&Accounts::default())
             .unwrap()
             .contains("stored-secret"));
-        let overridden = Config::load_with(&store, &|key| match key {
-            "HORIZON_ELY_CLIENT_ID" => Some("override-app".into()),
-            "HORIZON_ELY_CLIENT_SECRET" => Some("override-secret".into()),
-            _ => None,
-        })
+        let overridden = Config::load_with(
+            &store,
+            &|key| match key {
+                "HORIZON_ELY_CLIENT_ID" => Some("override-app".into()),
+                _ => None,
+            },
+            None,
+        )
         .unwrap();
         assert_eq!(overridden.client_id, "override-app");
-        assert_eq!(overridden.client_secret, "override-secret");
+        assert!(configure_with(
+            &store,
+            r#"{"client_id":"app","client_secret":"must-not-be-saved"}"#
+        )
+        .is_err());
         assert!(configure_with(&MemoryStore::default(), input).is_err());
         assert!(!configure_with(&store, "invalid JSON with private-data")
             .unwrap_err()
@@ -492,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn authorization_code_is_exchanged_with_the_app_secret_then_loads_the_public_profile() {
+    fn authorization_code_is_exchanged_without_an_app_secret_then_loads_the_public_profile() {
         let (config, server) = api(vec![
             (
                 200,
@@ -503,28 +612,21 @@ mod tests {
                 json!({"uuid":"ffc8fdc9-5824-509e-8a57-c99b940fb996","username":"ElyPlayer"}),
             ),
         ]);
-        let (status, value) = token_request(
-            &config,
-            vec![
-                ("grant_type", "authorization_code"),
-                ("code", "one-use-code"),
-                ("redirect_uri", config.redirect.as_str()),
-            ],
-        )
-        .unwrap();
-        let secrets = tokens(status, &value, None).unwrap();
-        let account = profile(&config, &secrets.minecraft_token).unwrap();
+        let flow = BrowserFlow::new(config).unwrap();
+        let verifier = flow.verifier.clone();
+        let redirect = flow.config.redirect.to_string();
+        let (account, secrets) = flow.exchange_code("one-use-code").unwrap();
+        assert_eq!(secrets.minecraft_token, "new-access");
+        assert_eq!(secrets.refresh_token, "refresh-token");
         let requests = server.join().unwrap();
         let form: std::collections::HashMap<_, _> =
             url::form_urlencoded::parse(requests[0].1.as_bytes()).collect();
         assert_eq!(requests[0].0, "/token");
         assert_eq!(form.get("client_id").unwrap(), "test-app");
-        assert_eq!(form.get("client_secret").unwrap(), "app-secret");
+        assert!(!form.contains_key("client_secret"));
+        assert_eq!(form.get("code_verifier").unwrap(), &verifier);
         assert_eq!(form.get("code").unwrap(), "one-use-code");
-        assert_eq!(
-            form.get("redirect_uri").unwrap(),
-            "http://127.0.0.1:38467/oauth/ely"
-        );
+        assert_eq!(form.get("redirect_uri").unwrap(), &redirect);
         assert_eq!(
             requests[1],
             ("/info".into(), String::new(), "Bearer new-access".into())
@@ -537,7 +639,6 @@ mod tests {
     fn config() -> Config {
         Config {
             client_id: "test-app".into(),
-            client_secret: "app-secret".into(),
             redirect: parse_redirect("http://127.0.0.1:38467/oauth/ely").unwrap(),
             token_url: String::new(),
             info_url: String::new(),
@@ -565,9 +666,10 @@ mod tests {
             config,
             listener,
             state: "random-state-for-this-test".into(),
+            verifier: "private-verifier-for-this-flow".into(),
         };
         let url = flow.authorization_url(None);
-        assert!(!url.contains("app-secret"));
+        assert!(!url.contains("private-verifier-for-this-flow"));
         let url = Url::parse(&url).unwrap();
         let pairs: std::collections::HashMap<_, _> = url.query_pairs().collect();
         assert_eq!(
@@ -576,13 +678,21 @@ mod tests {
         );
         assert_eq!(pairs.get("state").unwrap(), "random-state-for-this-test");
         assert_eq!(pairs.get("response_type").unwrap(), "code");
+        assert_eq!(pairs.get("code_challenge_method").unwrap(), "S256");
+        assert_eq!(
+            pairs.get("code_challenge").unwrap(),
+            &challenge(&flow.verifier)
+        );
         assert!(
-            matches!(request(&flow, "/oauth/ely?state=random-state-for-this-test&code=auth-code"), Callback::Code(c) if c == "auth-code")
+            matches!(request(&flow, "/oauth/ely?iss=https%3A%2F%2Faccount.ely.by&state=random-state-for-this-test&code=auth-code"), Callback::Code(c) if c == "auth-code")
         );
         for target in [
-            "/oauth/ely?state=wrong&code=stolen",
+            "/oauth/ely?iss=https%3A%2F%2Faccount.ely.by&state=wrong&code=stolen",
+            "/oauth/ely?state=random-state-for-this-test&code=stolen",
+            "/oauth/ely?iss=https%3A%2F%2Fevil.example&state=random-state-for-this-test&code=stolen",
+            "/oauth/ely?iss=https%3A%2F%2Faccount.ely.by&iss=https%3A%2F%2Faccount.ely.by&state=random-state-for-this-test&code=stolen",
             "/wrong?state=random-state-for-this-test&code=stolen",
-            "/oauth/ely?state=random-state-for-this-test&state=wrong&code=stolen",
+            "/oauth/ely?iss=https%3A%2F%2Faccount.ely.by&state=random-state-for-this-test&state=wrong&code=stolen",
             "https://evil.example/oauth/ely?code=stolen",
         ] {
             assert!(matches!(request(&flow, target), Callback::Ignore));
@@ -590,7 +700,7 @@ mod tests {
         assert!(matches!(
             request(
                 &flow,
-                "/oauth/ely?state=random-state-for-this-test&error=access_denied"
+                "/oauth/ely?iss=https%3A%2F%2Faccount.ely.by&state=random-state-for-this-test&error=access_denied"
             ),
             Callback::Denied
         ));
@@ -604,7 +714,7 @@ mod tests {
             "http://0.0.0.0:38467/oauth/ely",
             "http://127.0.0.1:0/oauth/ely",
             "http://127.0.0.1:38467/",
-            "http://127.0.0.1:38467/oauth/ely?state=preset",
+            "http://127.0.0.1:38467/oauth/ely?iss=https%3A%2F%2Faccount.ely.by&state=preset",
         ] {
             assert!(parse_redirect(url).is_err(), "accepted {url}");
         }
@@ -614,6 +724,7 @@ mod tests {
             config: config(),
             listener,
             state: "unused".into(),
+            verifier: "unused".into(),
         };
         assert!(flow.wait_code(&|| true, Duration::from_secs(60)).is_err());
         assert!(flow.wait_code(&|| false, Duration::ZERO).is_err());
@@ -640,6 +751,59 @@ mod tests {
         assert!(tokens(
             200,
             &json!({"access_token":"missing-refresh","expires_in":86400}),
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn public_refresh_sends_no_application_secret_and_retains_the_refresh_token() {
+        let (config, server) = api(vec![(
+            200,
+            json!({"access_token":"refreshed", "expires_in":86400, "token_type":"Bearer"}),
+        )]);
+        let previous = tokens(
+            200,
+            &json!({"access_token":"old", "refresh_token":"kept-refresh", "expires_in":86400}),
+            None,
+        )
+        .unwrap();
+        let (status, value) = token_request(
+            &config,
+            vec![
+                ("grant_type", "refresh_token"),
+                ("refresh_token", &previous.refresh_token),
+                ("scope", SCOPE),
+            ],
+        )
+        .unwrap();
+        let refreshed = tokens(status, &value, Some(&previous)).unwrap();
+        assert_eq!(refreshed.minecraft_token, "refreshed");
+        assert_eq!(refreshed.refresh_token, "kept-refresh");
+        let requests = server.join().unwrap();
+        let form: std::collections::HashMap<_, _> =
+            url::form_urlencoded::parse(requests[0].1.as_bytes()).collect();
+        assert_eq!(form.get("client_id").unwrap(), "test-app");
+        assert_eq!(form.get("refresh_token").unwrap(), "kept-refresh");
+        assert!(!form.contains_key("client_secret"));
+    }
+
+    #[test]
+    fn nonpositive_lifetimes_require_renewal_instead_of_extending_local_trust() {
+        for lifetime in [-1, 0] {
+            let before = now();
+            let session = tokens(
+                200,
+                &json!({"access_token":"access", "refresh_token":"refresh", "expires_in":lifetime}),
+                None,
+            )
+            .unwrap();
+            assert!(session.minecraft_expires_at >= before);
+            assert!(session.minecraft_expires_at <= now());
+        }
+        assert!(tokens(
+            200,
+            &json!({"access_token":"access", "refresh_token":"refresh", "expires_in":-10}),
             None
         )
         .is_err());

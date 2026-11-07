@@ -106,9 +106,11 @@ enum ServersCmd {
 
 #[derive(Subcommand)]
 enum AccountCmd {
-    /// Configure this launcher's Ely.by OAuth app in the OS keychain. Read JSON containing
-    /// client_id, client_secret and optional redirect_uri from stdin; never put secrets in arguments.
+    /// Configure a public Ely.by Desktop client ID override. Read JSON containing
+    /// client_id and optional redirect_uri from stdin. Client secrets are refused.
     ElyConfigure,
+    /// Show public Ely.by configuration of this installed build; never print credentials.
+    ElyStatus,
     /// Sign in to Ely.by in your browser; passwords and two-factor codes stay on Ely.by.
     ElySignIn,
     /// The signed-in accounts and which one plays
@@ -1855,6 +1857,17 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
             .ok_or_else(|| format!("No signed-in account {who}. See `horizon-launcher account`."))
     };
     match action {
+        AccountCmd::ElyStatus => {
+            let status = account::ely::oauth::status()?;
+            if as_json {
+                json(status);
+            } else {
+                println!(
+                    "Ely.by PKCE: {}",
+                    status["client_id"].as_str().unwrap_or_default()
+                );
+            }
+        }
         AccountCmd::ElyConfigure => {
             let mut input = String::new();
             std::io::stdin()

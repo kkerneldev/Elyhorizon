@@ -48,7 +48,24 @@ instructions. Keep both executables together to use Ely.by support in Horizon.
 Build-only runs expose the same files in the `elyhorizon-windows-x64` artifact.
 Minecraft jars, assets, prepared resources and OAuth secrets are not packaged.
 
-Ely.by application settings saved in one computer's credential manager do not
-travel with the release. Configure browser sign-in on the destination computer
-using [the Ely.by setup instructions](elyby-account.md). The client secret must
-not be embedded through Actions secrets, build environment variables or archives.
+## Ely.by release configuration
+
+Create an Ely.by **Desktop application** and set repository Actions Variable
+`HORIZON_ELY_CLIENT_ID` to its public ID. Do not use a Website registration, and do
+not supply a client secret. Both launcher workflows compile this safe public value
+into the executable. `HORIZON_MSA_CLIENT_ID` remains a separate public variable for
+Microsoft sign-in and is passed through unchanged.
+
+The project Desktop ID verified on 2026-11-07 is `elyherizondesktop`. Set that value
+in Actions Variables for this repository; other forks should register their own app.
+
+Before publishing, the workflow runs `tools/check_ely_oauth.py`. An empty ID, a
+confidential Website client, unavailable discovery, or rejected PKCE causes a clear
+failure; such builds must not be published as working releases. The installer smoke
+test invokes `account ely-status` from the installed EXE with no runtime Ely.by
+variables and a fresh launcher home, verifying its embedded public ID and PKCE mode.
+
+This verifies registration and packaged configuration, not human browser consent.
+Complete the manual clean-Windows sign-in and refresh checklist in
+[the Ely.by guide](elyby-account.md#provider-support-and-verification) before marking
+a release's authentication end-to-end verified. No separately hosted backend is needed.

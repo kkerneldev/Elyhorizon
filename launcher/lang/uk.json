@@ -13,8 +13,6 @@
   "Sign in on the Ely.by website. The launcher never receives your password or two-factor code.": "Увійдіть на сайті Ely.by. Лаунчер не отримує ваш пароль і код двофакторної автентифікації.",
   "Sign in with Ely.by or a Microsoft account that owns Minecraft to install game files automatically.": "Увійдіть через Ely.by або обліковий запис Microsoft, який володіє Minecraft, для автоматичного встановлення файлів гри.",
   "Sign-in cancelled.": "Вхід скасовано.",
-  "The Ely.by browser callback port is busy. Close another sign-in and retry.": "Порт відповіді браузера Ely.by зайнятий. Закрийте іншу спробу входу та повторіть.",
-  "Ely.by browser sign-in needs a registered Elyhorizon OAuth application. Configure HORIZON_ELY_CLIENT_ID and HORIZON_ELY_CLIENT_SECRET.": "Для входу через браузер потрібно зареєструвати OAuth-застосунок Elyhorizon в Ely.by. Налаштуйте HORIZON_ELY_CLIENT_ID і HORIZON_ELY_CLIENT_SECRET.",
   "Could not reach Ely.by. Check your internet connection.": "Не вдалося зв’язатися з Ely.by. Перевірте підключення до інтернету.",
   "Signed in as {actual} instead of {expected}. Use the Ely.by account for {expected}.": "Виконано вхід як {actual} замість {expected}. Використовуйте обліковий запис Ely.by для {expected}.",
   "Ely.by account": "Обліковий запис Ely.by",
@@ -894,5 +892,7 @@
   "You haven't played this one yet. Press Play to start.": "Ви ще не грали в цей екземпляр. Натисніть «Грати», щоб почати.",
   "You've played for {time}! Last played {when}.": "Ви зіграли {time}! Востаннє: {when}.",
   "Rust Edition": "Rust Edition",
-  "Java Edition": "Java Edition"
+  "Java Edition": "Java Edition",
+  "This build has no Ely.by Desktop application ID. Install a release configured with HORIZON_ELY_CLIENT_ID.": "This build has no Ely.by Desktop application ID. Install a release configured with HORIZON_ELY_CLIENT_ID.",
+  "Ely.by rejected this application. The release must use a registered public Desktop application ID, not a Website application.": "Ely.by rejected this application. The release must use a registered public Desktop application ID, not a Website application."
 }

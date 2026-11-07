@@ -72,10 +72,11 @@ If no downloads are available yet, run the
 Authentication opens the Ely.by website in your browser. Enter your password and
 two-factor code on the website; tokens are saved in your system credential store.
 
-Browser sign-in requires a one-time OAuth application configuration on the
-computer running the launcher. The application secret is not included in the
-release executable and does not transfer automatically from another computer.
-See [account setup and commands](docs/elyby-account.md).
+Release maintainers register a public Desktop application once and compile its
+public ID into the launcher through GitHub Actions Variables. End users do not
+configure environment variables or client secrets. The local browser flow uses
+S256 PKCE and a loopback callback, with no separately hosted backend.
+See [account setup and release verification](docs/elyby-account.md).
 
 Ely.by provides accounts and textures. Minecraft files, libraries, and resources
 are downloaded from official sources or reused from an existing installation.

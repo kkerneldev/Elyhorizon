@@ -13,8 +13,6 @@
   "Sign in on the Ely.by website. The launcher never receives your password or two-factor code.": "Ely.by web sitesinde giriş yapın. Başlatıcı parolanızı veya iki faktörlü kodunuzu asla almaz.",
   "Sign in with Ely.by or a Microsoft account that owns Minecraft to install game files automatically.": "Oyun dosyalarını otomatik yüklemek için Ely.by veya Minecraft sahibi bir Microsoft hesabıyla giriş yapın.",
   "Sign-in cancelled.": "Giriş iptal edildi.",
-  "The Ely.by browser callback port is busy. Close another sign-in and retry.": "Ely.by tarayıcı geri çağrı portu meşgul. Diğer giriş işlemini kapatıp tekrar deneyin.",
-  "Ely.by browser sign-in needs a registered Elyhorizon OAuth application. Configure HORIZON_ELY_CLIENT_ID and HORIZON_ELY_CLIENT_SECRET.": "Ely.by tarayıcı girişi kayıtlı bir Elyhorizon OAuth uygulaması gerektirir. HORIZON_ELY_CLIENT_ID ve HORIZON_ELY_CLIENT_SECRET değişkenlerini yapılandırın.",
   "Could not reach Ely.by. Check your internet connection.": "Ely.by hizmetine ulaşılamadı. İnternet bağlantınızı kontrol edin.",
   "Signed in as {actual} instead of {expected}. Use the Ely.by account for {expected}.": "{expected} yerine {actual} olarak giriş yapıldı. {expected} için Ely.by hesabını kullanın.",
   "Ely.by account": "Ely.by hesabı",
@@ -894,5 +892,7 @@
   "You haven't played this one yet. Press Play to start.": "Bunu henüz oynamadın. Başlamak için Oyna'ya bas.",
   "You've played for {time}! Last played {when}.": "{time} oynadın! Son oynama: {when}.",
   "Rust Edition": "Rust Edition",
-  "Java Edition": "Java Edition"
+  "Java Edition": "Java Edition",
+  "This build has no Ely.by Desktop application ID. Install a release configured with HORIZON_ELY_CLIENT_ID.": "This build has no Ely.by Desktop application ID. Install a release configured with HORIZON_ELY_CLIENT_ID.",
+  "Ely.by rejected this application. The release must use a registered public Desktop application ID, not a Website application.": "Ely.by rejected this application. The release must use a registered public Desktop application ID, not a Website application."
 }

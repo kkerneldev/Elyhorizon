@@ -138,6 +138,7 @@ jobs:
       # Horizon's Azure app for Microsoft sign-in (docs/microsoft-account.md): a repository
       # variable, not a secret. Unset, the launcher says sign-in is not configured.
       HORIZON_MSA_CLIENT_ID: ${{ vars.HORIZON_MSA_CLIENT_ID }}
+      HORIZON_ELY_CLIENT_ID: ${{ vars.HORIZON_ELY_CLIENT_ID }}
       # The mod browser's CurseForge source (docs/mod-browser.md#curseforge): a repository secret. Unset, the
       # launcher searches Modrinth only.
       HORIZON_CURSEFORGE_API_KEY: ${{ secrets.HORIZON_CURSEFORGE_API_KEY }}
@@ -180,6 +181,11 @@ jobs:
             echo "LAUNCHER_FEATURES=gpui_platform/runtime_shaders" >> "$GITHUB_ENV"
           fi
       # Every test target (the library, the binary, tests/), on each system the launcher ships for.
+      - name: Verify Elyhorizon public Desktop registration
+        if: github.repository == 'kkerneldev/Elyhorizon'
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then python ../tools/check_ely_oauth.py
+          else python3 ../tools/check_ely_oauth.py; fi
       - run: cargo test --release --locked ${{ matrix.target && format('--target {0}', matrix.target) || '' }} ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
       - run: cargo build --release --locked ${{ matrix.target && format('--target {0}', matrix.target) || '' }} ${LAUNCHER_FEATURES:+--features "$LAUNCHER_FEATURES"}
       - name: The version is the release's
@@ -188,6 +194,18 @@ jobs:
           echo "$out"
           expected="${HORIZON_LAUNCHER_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}"
           [[ "$out" == "horizon-launcher $expected" ]] || { echo "::error::expected horizon-launcher $expected"; exit 1; }
+      - name: Public Ely.by configuration survives removal of the build environment
+        if: github.repository == 'kkerneldev/Elyhorizon'
+        run: |
+          expected="$HORIZON_ELY_CLIENT_ID"
+          export HORIZON_LAUNCHER_HOME="${RUNNER_TEMP//\\//}/ely-public-config-$RANDOM"
+          mkdir -p "$HORIZON_LAUNCHER_HOME"
+          export HORIZON_HOME="$HORIZON_LAUNCHER_HOME/game" XDG_DATA_HOME="$HORIZON_LAUNCHER_HOME/data" XDG_CONFIG_HOME="$HORIZON_LAUNCHER_HOME/config"
+          export HORIZON_LAUNCHER_NO_SELF_UPDATE=1 HORIZON_NO_AUDIO=1
+          export HORIZON_LAUNCHER_TRASH="$HORIZON_LAUNCHER_HOME/trash" HORIZON_LAUNCHER_CLIPBOARD="$HORIZON_LAUNCHER_HOME/clipboard" HORIZON_LAUNCHER_DESKTOP="$HORIZON_LAUNCHER_HOME/desktop"
+          env -u HORIZON_ELY_CLIENT_ID -u HORIZON_ELY_CLIENT_SECRET -u HORIZON_ELY_REDIRECT_URI "$BIN/${{ matrix.binary }}" --json account ely-status > ely-public-config.json
+          [[ "$(cat ely-public-config.json | jq -r .bundled_client_id)" == "$expected" ]]
+          [[ "$(cat ely-public-config.json | jq -r .flow)" == authorization_code_pkce ]]
       - name: Only system libraries
         run: |
           file="$BIN/${{ matrix.binary }}"

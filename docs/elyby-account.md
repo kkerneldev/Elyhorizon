@@ -1,43 +1,88 @@
 # Ely.by accounts
 
-Settings → Account → **Sign in with Ely.by** opens the system browser. Enter
-your credentials and two-factor code only on `account.ely.by`. The launcher
-receives a one-use authorization code through a loopback callback, checks its
-random `state`, exchanges it for a session, and stores tokens in the existing
-OS secret store. It has no password or TOTP fields. Cancel and a five-minute
-timeout close the callback listener; a rejected or cancelled flow never adds
-an account. Sign in again restores the selected identity without switching to
-a different account.
+Settings → Account → **Sign in with Ely.by** opens the system browser. The launcher
+uses Authorization Code with **S256 PKCE**, a random state, and an ephemeral
+`http://127.0.0.1:<port>/oauth/ely` callback. It checks the exact callback path,
+state and `iss=https://account.ely.by`, then sends the code and the private verifier
+directly to Ely.by over HTTPS. Codes, verifiers and bearer tokens never follow
+HTTP redirects. No hosted backend or client secret is used.
 
-## Configure the launcher application once
+Credentials and two-factor codes stay on Ely.by. User access/refresh tokens are
+kept by the existing account secret store. Cancelling, timeout and rejected
+callbacks do not add or select an account. Microsoft sign-in is unchanged.
 
-Ely.by requires a registered OAuth application. Registration cannot be replaced
-with a made-up client ID or another launcher's credentials.
+## Release maintainer: register a public Desktop application
 
-1. Open https://account.ely.by/dev under the account that owns Elyhorizon.
-2. Register an application named **Elyhorizon**, type **Website**, with redirect
-   URI `http://127.0.0.1:38467/oauth/ely`.
-3. Provide `HORIZON_ELY_CLIENT_ID` and `HORIZON_ELY_CLIENT_SECRET` to the launcher
-   process. Do not commit the secret or send it in chat. The launcher does not
-   put it in authorization URLs, account-list output, or session files.
-4. If another callback address was registered, set `HORIZON_ELY_REDIRECT_URI`
-   to that exact URI. Only HTTP on `127.0.0.1`, an explicit nonzero port and a
-   callback path are accepted. Remote callbacks and wildcard binds are refused.
+1. Open https://account.ely.by/dev and create an application of type **Desktop application**.
+2. Copy its public client ID. A Website registration such as the old `elyhorizon2`
+   is confidential and still requires a secret; omitting that secret does not turn
+   it into a public client. Create a Desktop registration instead.
+3. In your GitHub repository, open **Settings → Secrets and variables → Actions → Variables**.
+   Add `HORIZON_ELY_CLIENT_ID` with that public Desktop ID.
+4. Run the Elyhorizon release workflow. It validates the live registration before
+   building, compiles the public ID into the launcher and tests the installed EXE
+   after removing the build environment and using an empty launcher home.
 
-Alternatively, run `horizon-launcher account ely-configure` once and provide a
-JSON line on stdin with `client_id`, `client_secret`, and optional `redirect_uri`.
-Use a secure prompt or credential manager to supply it, not shell arguments or
-history. The app configuration is saved as a separate OS keychain entry and is
-loaded automatically on later launches. Environment variables override it.
-This configuration command is intentionally not exposed as an MCP tool and
-prints only the public client ID, never the secret.
+Only this public ID is distributed. **Do not set or embed HORIZON_ELY_CLIENT_SECRET**;
+this launcher no longer reads it. No Ely.by secret belongs in Actions Secrets,
+source, installers or release artifacts. Rotate previously disclosed Website
+credentials in Ely.by and use the public Desktop registration for new releases.
 
-Requested scopes are `account_info offline_access minecraft_server_session`.
-The documented Ely OAuth protocol requires `client_secret` during exchange and
-refresh and does not document PKCE. For a public distributed application, keep
-confidential app credentials in a managed exchange service rather than embedding
-them in an executable. This local integration reads credentials at runtime and
-does not provision or host such a service.
+Users of a correctly built release simply click Sign in with Ely.by; no developer
+keychain, environment variables or application setup is required on their computer.
+
+For source development, `HORIZON_ELY_CLIENT_ID` can be supplied when running Cargo
+and will be compiled into that build. A runtime override takes precedence. The
+optional `account ely-configure` command accepts public `client_id` and optional
+loopback `redirect_uri` on stdin, refuses `client_secret`, and is not part of the
+normal installed-user flow. Its port is replaced by an OS-assigned free port.
+A legacy local application record is not needed by a configured release.
+
+`horizon-launcher --json account ely-status` prints only the effective and bundled
+public ID, PKCE method and flow. A missing ID reports a release configuration error;
+`invalid_client` reports that the maintainer must use a public Desktop registration,
+rather than asking the player for a secret. Provider error descriptions are never
+reflected into diagnostics. A refresh failure preserves the existing selected
+account; an invalid/expired grant asks the player to sign in again.
+
+## Provider support and verification
+
+The older [OAuth guide](https://docs.ely.by/en/oauth.html) describes Website clients
+and is incomplete for Desktop apps. The live
+[discovery document](https://account.ely.by/.well-known/openid-configuration)
+advertises S256 and token authentication method `none`.
+
+We inspected the official Apache-2.0 Ely.by implementations as protocol references,
+not as copied implementation code:
+
+- [accounts at d4b7f3e](https://github.com/elyby/accounts/tree/d4b7f3eff3572de5f917968321ddc6c007474da0): public Desktop client authentication, loopback redirects, discovery and PKCE tests.
+- [accounts-frontend at 7ab69d0c](https://github.com/elyby/accounts-frontend/tree/7ab69d0c7d258538f8560df7ad209fe8becd0620): forwarding authorization parameters, including PKCE, through browser validation/completion.
+- [RFC 7636](https://www.rfc-editor.org/rfc/rfc7636): S256 algorithm and independent test vector.
+
+`python tools/check_ely_oauth.py` checks discovery, rejects a registration that does
+not require PKCE, verifies S256/loopback authorization validation, checks that `plain`
+is rejected, and submits an intentionally invalid code to check secret-free client
+authentication. It never requests or receives a real user token. This preflight is
+**not an interactive end-to-end sign-in test**. Before calling a release verified,
+install its actual setup EXE on clean Windows, complete browser consent, check the
+selected profile, restart the launcher and verify refresh. The maintainer must
+perform that check with their registered Desktop ID and a real test account.
+
+### Local verification on 2026-11-07
+
+With public Desktop ID `elyherizondesktop`, the live preflight passed. A locally
+compiled installer containing the rebuilt launcher and Horizon client was installed
+under an isolated test application ID and fresh data homes. With all runtime
+`HORIZON_ELY_*` variables removed, the installed EXE reported the embedded public
+ID, completed real browser sign-in and the loopback callback, selected the profile,
+and refreshed it from a separate process to `Ready for online play`. Both installed
+program hashes matched the staged files. Uninstallation preserved the isolated
+profile and player-data marker.
+
+This used a local development launcher build and an optimized `fast` game build,
+not a GitHub-produced release or a pristine Windows VM. The same checks are wired
+into the release workflow, but its actual artifact still needs the clean-Windows
+interactive verification above. No backend deployment is required.
 
 ## Automatic installation and file sources
 
