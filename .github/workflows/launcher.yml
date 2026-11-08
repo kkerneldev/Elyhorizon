@@ -111,11 +111,13 @@ jobs:
             asset: horizon-launcher-linux-x86_64.tar.gz
             binary: horizon-launcher
           - name: macos
+            os: macos-15
             mac: true
             asset: horizon-launcher-macos-arm64.zip
             binary: horizon-launcher
             mac_arch: arm64
           - name: macos-x64
+            os: macos-15-intel
             mac: true
             target: x86_64-apple-darwin
             asset: horizon-launcher-macos-x64.zip
@@ -128,7 +130,7 @@ jobs:
             # The C runtime linked in: without it the launcher asks for VCRUNTIME140.dll,
             # which only the Visual C++ redistributable installs.
             rustflags: -C target-feature=+crt-static
-    runs-on: ${{ matrix.mac && (vars.MAC_RUNNER || 'ludovics-mac-mini') || matrix.os }}
+    runs-on: ${{ matrix.os }}
     # Notarizing the app and then the .dmg can take a few minutes each.
     timeout-minutes: ${{ matrix.mac && 60 || 40 }}
     env:

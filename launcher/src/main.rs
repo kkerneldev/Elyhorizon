@@ -32,6 +32,7 @@ mod internet;
 mod language_page;
 mod launch_page;
 mod line_edit;
+mod login_focus;
 mod markdown;
 mod mcp;
 mod microsoft;
@@ -986,7 +987,7 @@ impl Launcher {
                             self.step_aside(cx);
                         }
                         Err(e) => {
-                            if e == account::NoOwner.to_string() {
+                            if e == account::NoOwner::default().to_string() {
                                 self.owner = Some(false);
                                 self.owner_screen_open = true;
                             }
@@ -1000,10 +1001,15 @@ impl Launcher {
                         let mut cmd = backend::client_command(&tag);
                         let (file, offline) = match session {
                             Ok(pass) => pass,
-                            Err(account::NoOwner) => {
-                                self.owner = Some(false);
-                                self.owner_screen_open = true;
-                                self.client_error = Some(format!("{}.", tr(account::NEEDS_OWNER)));
+                            Err(refused) => {
+                                if refused.reason.is_none() {
+                                    self.owner = Some(false);
+                                    self.owner_screen_open = true;
+                                }
+                                self.client_error =
+                                    Some(refused.reason.unwrap_or_else(|| {
+                                        format!("{}.", tr(account::NEEDS_OWNER))
+                                    }));
                                 self.starting_pack = None;
                                 self.joining = None;
                                 self.quick_play = None;
@@ -1317,6 +1323,9 @@ impl Launcher {
                     cx.open_url(url);
                 }
                 if let SignInState::Done(Ok(ref account)) = state {
+                    if account.is_ely() {
+                        self.return_after_ely_login(cx);
+                    }
                     self.auth_busy.remove(&account.uuid);
                     self.sign_in_target = None;
                     self.accounts = Accounts::load();
@@ -5292,7 +5301,7 @@ mod tests {
         use super::{sign_in_change, SignInState};
         let mut shown = None;
         let completed = SignInState::Done(Ok(horizon_launcher::account::Account {
-            uuid: "11111111111111111111111111111111".into(),
+            uuid: "ely:11111111111111111111111111111111".into(),
             name: "TestAccount".into(),
             skin: None,
             cape: None,

@@ -142,7 +142,7 @@ fn github(url: &str, etag: Option<&str>) -> Answer {
     if let Some(etag) = etag {
         request = request.set("If-None-Match", etag);
     }
-    match request.call() {
+    match crate::network::retry_request(url, || request.clone().call().map_err(Box::new)) {
         Ok(r) if r.status() == 304 => Answer::NotModified,
         Ok(r) => {
             let etag = r.header("ETag").map(str::to_owned);
@@ -151,17 +151,19 @@ fn github(url: &str, etag: Option<&str>) -> Answer {
                 Err(e) => Answer::Failed(e.to_string()),
             }
         }
-        Err(e) => failure(url, e),
+        Err(e) => failure(url, *e),
     }
 }
 
 fn mirror(url: &str) -> Answer {
-    match backend::agent(url).get(url).call() {
+    match crate::network::retry_request(url, || {
+        backend::agent(url).get(url).call().map_err(Box::new)
+    }) {
         Ok(r) => match r.into_json() {
             Ok(body) => Answer::Fresh(body, None),
             Err(e) => Answer::Failed(e.to_string()),
         },
-        Err(e) => failure(url, e),
+        Err(e) => failure(url, *e),
     }
 }
 
@@ -171,8 +173,8 @@ fn failure(url: &str, e: ureq::Error) -> Answer {
         ureq::Error::Status(code, r) if rate_limited(code, |h| r.header(h).map(str::to_owned)) => {
             Answer::RateLimited
         }
-        ureq::Error::Status(code, _) => Answer::Failed(format!("{url} answered {code}")),
-        ureq::Error::Transport(t) => Answer::Failed(format!("No connection: {t}")),
+        ureq::Error::Status(code, _) => Answer::Failed(crate::i18n::trf("Download server {endpoint} returned HTTP {status}.", &[("endpoint", &crate::network::endpoint(url)), ("status", &code.to_string())])),
+        ureq::Error::Transport(_) => Answer::Failed(crate::i18n::trf("Could not connect to download server {endpoint}. Check your network and proxy settings.", &[("endpoint", &crate::network::endpoint(url))])),
     }
 }
 

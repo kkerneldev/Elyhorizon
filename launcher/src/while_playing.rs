@@ -12,6 +12,10 @@ pub(super) struct Aside {
 }
 
 impl Aside {
+    pub(super) fn window_for_login(&self) -> AnyWindowHandle {
+        self.window
+    }
+
     pub(super) fn new(window: AnyWindowHandle) -> Self {
         Aside {
             window,

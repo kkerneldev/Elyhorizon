@@ -233,3 +233,5 @@ Scores: 0 (absent), 0.25 (started), 0.5 (playable, major features missing), 0.75
 | Block behaviours and ticking | 1 | None: block updates, random ticks, redstone, dispensers (6,000 cases), crafters (4,000), container spills (4,000), copper golems and the sculk family (435 scenarios) match |
 
 </details>
+
+See the [0.2.2 verification checklist](docs/elyhorizon-0.2.2-verification.md) for clean-install testing, authentication diagnostics and current verification limits.

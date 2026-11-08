@@ -139,9 +139,11 @@ one is selected. "Sign out" deletes the account's secrets from the keychain.
 - Linux and FreeBSD with no keychain answering (no Secret Service, a locked keychain, #5095): the
   secrets the keychain refuses go to `account-secrets.json` in the launcher's data folder instead,
   readable and writable by the player only (0600 on Unix) and never in plain text: the file is
-  encrypted (ChaCha20-Poly1305) with a key derived from the computer's identity (`/etc/machine-id`,
-  `/etc/hostid`), so a copy taken off the computer (a backup, a synced home folder) can't be read
-  elsewhere. On the computer itself the file's mode is what keeps other users out. A file that
+  encrypted (ChaCha20-Poly1305) with a random per-installation key in `account-secrets.key`.
+  Both files use owner-only permissions (`0600`); the key must be protected with the same care
+  as the tokens. Copying both files exposes the same access as the original profile, so do not
+  sync them to public or shared storage. Older `HZSECv1` files remain readable and are resealed
+  as `HZSECv2` on their next write. Windows and macOS continue using their OS keychain. A file that
   doesn't open (another computer's, or changed) is never written over: remove it and sign in again. The
   launcher never picks one store for a run: every read takes the file's copy first (it was written
   while the keychain was away, so it is the newer one) and the keychain's otherwise, and every write

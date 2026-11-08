@@ -706,6 +706,51 @@ impl FileStore {
         Self { path }
     }
 
+    /// The fallback is only used in production on Linux/FreeBSD. Its random key is
+    /// protected by owner-only permissions, rather than derived from public machine IDs.
+    fn file_key(&self, create: bool) -> Result<chacha20poly1305::Key, String> {
+        let path = self.path.with_extension("key");
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if create && error.kind() == std::io::ErrorKind::NotFound => {
+                let mut key = [0u8; 32];
+                getrandom::fill(&mut key).map_err(|e| e.to_string())?;
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+                let mut file = options.open(&path).map_err(|e| self.shown(e))?;
+                std::io::Write::write_all(&mut file, &key)
+                    .and_then(|_| file.sync_all())
+                    .map_err(|e| self.shown(e))?;
+                key.to_vec()
+            }
+            Err(error) => return Err(self.shown(error)),
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if std::fs::metadata(&path)
+                .map_err(|e| self.shown(e))?
+                .permissions()
+                .mode()
+                & 0o077
+                != 0
+            {
+                return Err(crate::i18n::tr(
+                    "The account key must be readable only by its owner (mode 0600).",
+                )
+                .into());
+            }
+        }
+        let key: [u8; 32] = bytes.try_into().map_err(|_| {
+            crate::i18n::tr(
+                "The account key is damaged. Restore it from a secure backup or sign in again.",
+            )
+        })?;
+        Ok(key.into())
+    }
+
     /// The launcher's own: [`SECRETS_FILE`] in its data folder.
     pub fn launcher() -> Self {
         Self::new(crate::backend::data_dir().join(SECRETS_FILE))
@@ -745,13 +790,23 @@ impl FileStore {
     fn read(&self) -> Result<std::collections::BTreeMap<String, String>, String> {
         match std::fs::read(&self.path) {
             // Only where the file breaks: serde's own message can quote what the file holds.
-            Ok(bytes) => serde_json::from_slice(&unseal(&bytes).ok_or_else(|| {
-                format!(
+            Ok(bytes) => serde_json::from_slice(
+                &unseal(
+                    &bytes,
+                    &if bytes.starts_with(SEALED) {
+                        self.file_key(false)?
+                    } else {
+                        legacy_file_key()
+                    },
+                )
+                .ok_or_else(|| {
+                    format!(
                     "{} can't be read on this computer: it was written on another one, or changed. \
                      Remove it and sign in again.",
                     self.path.display()
                 )
-            })?)
+                })?,
+            )
             .map_err(|e| {
                 format!(
                     "{} can't be read ({:?} error at line {}, column {}).",
@@ -781,7 +836,7 @@ impl FileStore {
             .path
             .with_extension(format!("json.{}.{n}.tmp", std::process::id()));
         let json = serde_json::to_vec(secrets).map_err(|e| e.to_string())?;
-        let sealed = seal(&json)?;
+        let sealed = seal(&json, &self.file_key(true)?)?;
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -840,15 +895,16 @@ impl FileStore {
     }
 }
 
-/// The secrets file's first bytes: format 1, the JSON sealed with ChaCha20-Poly1305 under
-/// [`file_key`], then a random 12-byte nonce and the ciphertext with its tag.
-const SEALED: &[u8] = b"HZSECv1\n";
+/// The secrets file's first bytes: format 2, the JSON sealed with ChaCha20-Poly1305 under
+/// the store's owner-only random key, then a random 12-byte nonce and the ciphertext with its tag.
+const SEALED: &[u8] = b"HZSECv2\n";
+const LEGACY_SEALED: &[u8] = b"HZSECv1\n";
 
-/// The secrets file's key: this computer's identity (`/etc/machine-id` on Linux, `/etc/hostid` on
+/// Legacy read-only migration key: this computer's identity (`/etc/machine-id` on Linux, `/etc/hostid` on
 /// FreeBSD) hashed with a constant of the launcher's. The tokens are never on disk in plain text,
-/// and a copy of the file taken off the computer (a backup, a synced home folder) can't be read
-/// elsewhere. On the computer itself, the file's mode (0600) is what keeps other users out.
-fn file_key() -> chacha20poly1305::Key {
+/// New writes never use this predictable key. Kept only so an upgrade can read old
+/// sessions and reseal them under a random owner-only key on the next write.
+fn legacy_file_key() -> chacha20poly1305::Key {
     use sha2::Digest;
     let mut hash = sha2::Sha256::new();
     hash.update(b"horizon-launcher account-secrets v1");
@@ -862,11 +918,11 @@ fn file_key() -> chacha20poly1305::Key {
 }
 
 /// `json` sealed for the secrets file ([`SEALED`]).
-fn seal(json: &[u8]) -> Result<Vec<u8>, String> {
+fn seal(json: &[u8], key: &chacha20poly1305::Key) -> Result<Vec<u8>, String> {
     use chacha20poly1305::{aead::Aead, KeyInit};
     let mut nonce = [0u8; 12];
     getrandom::fill(&mut nonce).map_err(|e| e.to_string())?;
-    let sealed = chacha20poly1305::ChaCha20Poly1305::new(&file_key())
+    let sealed = chacha20poly1305::ChaCha20Poly1305::new(key)
         .encrypt(&nonce.into(), json)
         .map_err(|_| "the secrets couldn't be sealed".to_string())?;
     Ok([SEALED, &nonce, &sealed].concat())
@@ -874,12 +930,14 @@ fn seal(json: &[u8]) -> Result<Vec<u8>, String> {
 
 /// What [`seal`] sealed, or `None` for a file in another format, changed, or sealed on another
 /// computer.
-fn unseal(bytes: &[u8]) -> Option<Vec<u8>> {
+fn unseal(bytes: &[u8], key: &chacha20poly1305::Key) -> Option<Vec<u8>> {
     use chacha20poly1305::{aead::Aead, KeyInit};
-    let rest = bytes.strip_prefix(SEALED)?;
+    let rest = bytes
+        .strip_prefix(SEALED)
+        .or_else(|| bytes.strip_prefix(LEGACY_SEALED))?;
     let (nonce, sealed) = rest.split_at_checked(12)?;
     let nonce: [u8; 12] = nonce.try_into().ok()?;
-    chacha20poly1305::ChaCha20Poly1305::new(&file_key())
+    chacha20poly1305::ChaCha20Poly1305::new(key)
         .decrypt(&nonce.into(), sealed)
         .ok()
 }
@@ -1787,11 +1845,17 @@ impl Accounts {
 }
 
 /// No account in the launcher owns Minecraft: Java Edition: the game must not start.
-#[derive(Debug, PartialEq)]
-pub struct NoOwner;
+#[derive(Debug, Default, PartialEq)]
+pub struct NoOwner {
+    /// A provider/keychain failure is not a demand for a different provider's account.
+    pub reason: Option<String>,
+}
 impl std::fmt::Display for NoOwner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{NEEDS_OWNER}.")
+        match &self.reason {
+            Some(reason) => f.write_str(reason),
+            None => write!(f, "{NEEDS_OWNER}."),
+        }
     }
 }
 
@@ -1922,7 +1986,7 @@ pub fn launch(
     if owned {
         Ok(pass)
     } else {
-        Err(NoOwner)
+        Err(NoOwner::default())
     }
 }
 
@@ -1937,19 +2001,50 @@ pub fn launch_for_game(
     accounts: &mut Accounts,
     offline_without_owner: bool,
 ) -> Result<Launch, NoOwner> {
+    launch_for_game_with_refresh(
+        ep,
+        client_id,
+        store,
+        accounts,
+        offline_without_owner,
+        &ely::refresh,
+    )
+}
+
+fn launch_for_game_with_refresh(
+    ep: &Endpoints,
+    client_id: Option<&str>,
+    store: &dyn SecretStore,
+    accounts: &mut Accounts,
+    offline_without_owner: bool,
+    refresh_ely: &dyn Fn(&Account, Secrets) -> Check,
+) -> Result<Launch, NoOwner> {
     if let Some(account) = accounts.selected().filter(|a| a.is_ely()).cloned() {
-        let _operation = session::lock(store).map_err(|_| NoOwner)?;
-        let secrets = secrets_in(store, &account.uuid)
+        let _operation = session::lock(store).map_err(|reason| NoOwner {
+            reason: Some(reason),
+        })?;
+        let secrets = store
+            .get(&account.uuid)
+            .map_err(|reason| NoOwner {
+                reason: Some(reason),
+            })?
+            .and_then(|text| serde_json::from_str::<Secrets>(&text).ok())
             .filter(|s| s.ely)
-            .ok_or(NoOwner)?;
-        return match ely::refresh(&account, secrets) {
+            .ok_or_else(|| NoOwner {
+                reason: Some(crate::i18n::tr(ely::EXPIRED).to_owned()),
+            })?;
+        return match refresh_ely(&account, secrets) {
             Check::Owns(renewed, secrets) => {
                 store
                     .set(
                         &renewed.uuid,
-                        &serde_json::to_string(&secrets).map_err(|_| NoOwner)?,
+                        &serde_json::to_string(&secrets).map_err(|reason| NoOwner {
+                            reason: Some(reason.to_string()),
+                        })?,
                     )
-                    .map_err(|_| NoOwner)?;
+                    .map_err(|reason| NoOwner {
+                        reason: Some(reason.to_string()),
+                    })?;
                 accounts.update(renewed.clone());
                 Ok(Launch {
                     session: Some((renewed, secrets)),
@@ -1960,11 +2055,17 @@ pub fn launch_for_game(
                 store
                     .set(
                         &account.uuid,
-                        &serde_json::to_string(&secrets).map_err(|_| NoOwner)?,
+                        &serde_json::to_string(&secrets).map_err(|reason| NoOwner {
+                            reason: Some(reason.to_string()),
+                        })?,
                     )
-                    .map_err(|_| NoOwner)?;
+                    .map_err(|reason| NoOwner {
+                        reason: Some(reason.to_string()),
+                    })?;
                 if secrets.sign_in_required {
-                    return Err(NoOwner);
+                    return Err(NoOwner {
+                        reason: Some(message),
+                    });
                 }
                 Ok(Launch {
                     session: Some((account, secrets)),
@@ -1972,11 +2073,13 @@ pub fn launch_for_game(
                     ..Launch::default()
                 })
             }
-            Check::DoesNot(_) => Err(NoOwner),
+            Check::DoesNot(_) => Err(NoOwner {
+                reason: Some(crate::i18n::tr(ely::EXPIRED).to_owned()),
+            }),
         };
     }
     match launch(ep, client_id, store, accounts) {
-        Err(NoOwner) if offline_without_owner => Ok(Launch::default()),
+        Err(_) if offline_without_owner => Ok(Launch::default()),
         pass => pass,
     }
 }
@@ -2093,22 +2196,27 @@ impl SignIn {
                 let flow = ely::oauth::BrowserFlow::new(config)?;
                 *thread_state.lock().unwrap() =
                     SignInState::Browser(flow.authorization_url(expected.as_ref()));
-                let (account, secrets) = flow.finish(&|| thread_cancel.load(Ordering::Relaxed))?;
-                *thread_state.lock().unwrap() = SignInState::Working(session::Phase::Saving);
-                let store = store();
-                let _operation = session::lock(store)?;
-                let mut accounts = Accounts::load();
-                accept_sign_in(
-                    &mut accounts,
-                    store,
-                    expected.as_ref(),
-                    account.clone(),
-                    &secrets,
+                flow.finish(
                     &|| thread_cancel.load(Ordering::Relaxed),
-                    &|_| {},
-                )?;
-                accounts.save()?;
-                Ok(account)
+                    |account, secrets| {
+                        *thread_state.lock().unwrap() =
+                            SignInState::Working(session::Phase::Saving);
+                        let store = store();
+                        let _operation = session::lock(store)?;
+                        let mut accounts = Accounts::load();
+                        accept_sign_in(
+                            &mut accounts,
+                            store,
+                            expected.as_ref(),
+                            account.clone(),
+                            &secrets,
+                            &|| thread_cancel.load(Ordering::Relaxed),
+                            &|_| {},
+                        )?;
+                        accounts.save()?;
+                        Ok(account)
+                    },
+                )
             })();
             *thread_state.lock().unwrap() = SignInState::Done(result);
         });
@@ -2276,7 +2384,7 @@ fn java_player_with(
     if accounts.selected().is_some_and(Account::is_ely) {
         let pass =
             launch_for_game(ep, client_id, store, accounts, false).map_err(|e| e.to_string())?;
-        let (account, secrets) = pass.session.ok_or_else(|| NoOwner.to_string())?;
+        let (account, secrets) = pass.session.ok_or_else(|| NoOwner::default().to_string())?;
         return Ok(crate::java_launch::Player {
             ely: true,
             uuid: account.profile_uuid().to_owned(),
@@ -2296,7 +2404,7 @@ fn java_player_with(
         .session
         .or(pass.owner)
         .or_else(kept)
-        .ok_or_else(|| NoOwner.to_string())?;
+        .ok_or_else(|| NoOwner::default().to_string())?;
     Ok(crate::java_launch::Player {
         ely: false,
         name: account.name,

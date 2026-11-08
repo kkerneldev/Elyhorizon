@@ -32,3 +32,12 @@ class ReleaseConfigurationTests(unittest.TestCase):
             return 200, dict(success=True)
         with self.assertRaisesRegex(ValueError, "Desktop application"):
             gate.check("website-app", service)
+
+    def test_invalid_public_id_reports_the_provider_status_without_asking_for_a_secret(self):
+        def service(path, *_):
+            if path.startswith("/.well-known/"):
+                return 200, dict(issuer=gate.ISSUER, code_challenge_methods_supported=["S256"], token_endpoint_auth_methods_supported=["none"])
+            return 401, dict(error="invalid_client", error_description="reflected-private-value")
+        with self.assertRaisesRegex(ValueError, "HTTP 401 invalid_client") as raised:
+            gate.check("elyhorizondesktop", service)
+        self.assertNotIn("reflected-private-value", str(raised.exception))

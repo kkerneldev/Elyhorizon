@@ -155,35 +155,11 @@ pub(crate) fn agent(url: &str) -> ureq::Agent {
 
 /// A file's body, from the network as the launcher reaches it.
 pub fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let mut body = Vec::new();
-    get(url)?
-        .into_reader()
-        .read_to_end(&mut body)
-        .map_err(|e| e.to_string())?;
-    Ok(body)
+    crate::network::bytes(url)
 }
 
 pub(crate) fn get(url: &str) -> Result<ureq::Response, String> {
-    let mut request = agent(url).get(url);
-    // CI runners share addresses and hit GitHub's anonymous rate limit; they pass their own token.
-    if let Some(token) = std::env::var("HORIZON_GITHUB_TOKEN")
-        .ok()
-        .filter(|t| !t.is_empty())
-    {
-        if url.starts_with("https://api.github.com/") {
-            request = request.set("Authorization", &format!("Bearer {token}"));
-        }
-    }
-    request.call().map_err(|e| match e {
-        ureq::Error::Status(code, r)
-            if url.starts_with("https://api.github.com/")
-                && crate::github::rate_limited(code, |h| r.header(h).map(str::to_owned)) =>
-        {
-            "GitHub's rate limit was reached. Try again in a few minutes.".into()
-        }
-        ureq::Error::Status(code, _) => format!("{url} answered {code}"),
-        ureq::Error::Transport(t) => format!("No connection: {t}"),
-    })
+    crate::network::get(url)
 }
 
 /// A Horizon game tag: `v` then a digit (`v2026.10.13`). Launcher tags never match.
@@ -693,18 +669,7 @@ fn installed_in(versions: &Path) -> Vec<String> {
 
 /// A small release file (its checksums or their signature), whole; None when it has none.
 pub(crate) fn fetch_small(url: &str) -> Result<Option<Vec<u8>>, String> {
-    let response = match get(url) {
-        Ok(response) => response,
-        Err(e) if e.ends_with("answered 404") => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    let mut body = Vec::new();
-    response
-        .into_reader()
-        .take(1 << 20)
-        .read_to_end(&mut body)
-        .map_err(|e| format!("Download interrupted: {e}"))?;
-    Ok(Some(body))
+    crate::network::small(url)
 }
 
 /// The SHA-256 the release's signed checksums give for `asset`, or why it must not be installed.
@@ -726,34 +691,7 @@ pub(crate) fn download(
     to: &Path,
     progress: &impl Fn(f32),
 ) -> Result<(), String> {
-    let response = get(url)?;
-    let size = match size {
-        0 => response
-            .header("Content-Length")
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(0),
-        n => n,
-    };
-    let mut reader = response.into_reader();
-    let mut file = fs::File::create(to).map_err(|e| e.to_string())?;
-    let mut hash = horizon_release_sign::Sha256::default();
-    let (mut done, mut buf) = (0u64, vec![0u8; 1 << 16]);
-    loop {
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| format!("Download interrupted: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        hash.update(&buf[..n]);
-        file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-        done += n as u64;
-        progress((done as f32 / size.max(1) as f32).min(1.0) * 0.9);
-    }
-    let name = url.rsplit('/').next().unwrap_or(url);
-    horizon_release_sign::check(name, sha256, &hash.hex()).inspect_err(|_| {
-        let _ = fs::remove_file(to);
-    })
+    crate::network::download(url, size, sha256, to, progress)
 }
 
 fn unpack(archive: &Path, url: &str, to: &Path) -> Result<(), String> {
@@ -1329,14 +1267,7 @@ fn refill_own_store(tag: &str) {
     else {
         return;
     };
-    let fetch = |url: &str| -> Result<Vec<u8>, String> {
-        let mut body = Vec::new();
-        get(url)?
-            .into_reader()
-            .read_to_end(&mut body)
-            .map_err(|e| e.to_string())?;
-        Ok(body)
-    };
+    let fetch = |url: &str| -> Result<Vec<u8>, String> { get_bytes(url) };
     if let Err(e) = download_for_owner(&pins, &own, &fetch, &|line| eprintln!("{line}")) {
         eprintln!("{tag}: the missing assets were not downloaded: {e}");
     }
@@ -1498,14 +1429,7 @@ pub fn download_version_for_owner(
     log: &dyn Fn(String),
 ) -> Result<PathBuf, String> {
     let dir = data_dir().join("minecraft");
-    let fetch = |url: &str| -> Result<Vec<u8>, String> {
-        let mut body = Vec::new();
-        get(url)?
-            .into_reader()
-            .read_to_end(&mut body)
-            .map_err(|e| e.to_string())?;
-        Ok(body)
-    };
+    let fetch = |url: &str| -> Result<Vec<u8>, String> { get_bytes(url) };
     let pins = sources::Pins::for_version(id, manifest_sha1);
     download_for_owner(&pins, &dir, &fetch, log)
         .map_err(|e| e.trim_start_matches("\n  • ").to_string())?;
@@ -1629,6 +1553,7 @@ fn download_for(
             "Downloading Minecraft {version} needs a fresh sign-in. The account could not be checked: {reason}",
             &[("version", v), ("reason", &pass.offline.unwrap_or_default())],
         )),
+        Err(refused) if refused.reason.is_some() => Err(refused.reason.unwrap()),
         Err(_) if signed_in => Err(crate::i18n::tr("Sign in again with Ely.by or a Microsoft account that owns Minecraft before downloading game files.").into()),
         Err(_) => Err(crate::i18n::tr("Sign in with Ely.by or a Microsoft account that owns Minecraft to install game files automatically.").into()),
     }
@@ -1676,14 +1601,7 @@ fn java(
             "{missing}\n  • Minecraft's own Java from Mojang needs glibc ({GLIBC_LOADER} is missing; on NixOS, enable programs.nix-ld), so install compatible Java instead."
         ));
     }
-    let fetch = |url: &str| -> Result<Vec<u8>, String> {
-        let mut body = Vec::new();
-        get(url)?
-            .into_reader()
-            .read_to_end(&mut body)
-            .map_err(|e| e.to_string())?;
-        Ok(body)
-    };
+    let fetch = |url: &str| -> Result<Vec<u8>, String> { get_bytes(url) };
     let runtime = data_dir().join("minecraft").join("runtime");
     let home = mojang::java_runtime(&component, &runtime, 8, &fetch, &mojang::CANCEL, log)
         .map_err(|e| {
@@ -1811,14 +1729,7 @@ pub fn preparer(
                 .map(|f| sources::known_folders(sources::Os::current(), &f))
                 .unwrap_or_default(),
         );
-        let fetch = |url: &str| -> Result<Vec<u8>, String> {
-            let mut body = Vec::new();
-            get(url)?
-                .into_reader()
-                .read_to_end(&mut body)
-                .map_err(|e| e.to_string())?;
-            Ok(body)
-        };
+        let fetch = |url: &str| -> Result<Vec<u8>, String> { get_bytes(url) };
         let linked = data_dir().join("linked-minecraft");
         if from == MinecraftFrom::Mojang {
             // Straight from Mojang (what is already there and whole is kept), for an owner only.
@@ -1886,11 +1797,19 @@ pub fn preparer(
             .ok_or_else(|| format!("{} has no server download", manifest.display()))?;
         log(format!("Downloading the {version} server jar from Mojang"));
         fs::create_dir_all(jar.parent().unwrap()).map_err(|e| e.to_string())?;
-        let mut body = Vec::new();
-        get(url)?
-            .into_reader()
-            .read_to_end(&mut body)
-            .map_err(|e| e.to_string())?;
+        let body = get_bytes(url)?;
+        let expected = json["downloads"]["server"]["sha1"]
+            .as_str()
+            .ok_or_else(|| {
+                crate::i18n::tr("The Minecraft server manifest has no integrity checksum.")
+                    .to_owned()
+            })?;
+        if sources::sha1_hex(&body) != expected {
+            return Err(crate::i18n::tr(
+                "The Minecraft server download failed its integrity check. Retry the installation.",
+            )
+            .into());
+        }
         let partial = jar.with_extension("partial");
         fs::write(&partial, body)
             .and_then(|_| fs::rename(&partial, &jar))
@@ -2454,7 +2373,13 @@ pub fn client_as(tag: &str, who: Option<&account::Player>) -> Result<Command, St
         None => account::session_for_game(&game_home(), false).map_err(|e| e.to_string()),
         Some(who) => account::session_for_game_as(&game_home(), who),
     }
-    .map_err(|refused| format!("{refused} Sign in with `horizon-launcher account sign-in`."))?;
+    .map_err(|refused| {
+        if refused == account::NoOwner::default().to_string() {
+            format!("{refused} Sign in with `horizon-launcher account sign-in`.")
+        } else {
+            refused
+        }
+    })?;
     need_prepared(tag)?;
     complete_assets(tag);
     crate::browser::horizon::before_play(&game_home());
@@ -3580,8 +3505,8 @@ mod tests {
         let log = |_: String| {};
         let no_owner = || Ok(account::Launch::default());
         for (pass, signed_in) in [
-            (Err(account::NoOwner), false),
-            (Err(account::NoOwner), true),
+            (Err(account::NoOwner::default()), false),
+            (Err(account::NoOwner::default()), true),
             (no_owner(), false),
             (no_owner(), true),
         ] {
@@ -3616,7 +3541,7 @@ mod tests {
         )
         .unwrap();
         asked.lock().unwrap().clear();
-        for (pass, signed_in) in [(Err(account::NoOwner), true), (no_owner(), true)] {
+        for (pass, signed_in) in [(Err(account::NoOwner::default()), true), (no_owner(), true)] {
             assert!(download_for(&pins, &dir, pass, signed_in, &fetch, &log).is_err());
         }
         assert!(asked.lock().unwrap().is_empty());
@@ -5054,12 +4979,25 @@ pub fn {f}("
         use std::os::unix::fs::PermissionsExt;
         let work = std::env::temp_dir().join(format!("horizon-bundle-{}", std::process::id()));
         let _ = fs::remove_dir_all(&work);
+        // Build a native, non-platform executable. Re-signing a copied /usr/bin/true
+        // can retain system-binary signing assumptions on Apple Silicon.
+        fs::create_dir_all(&work).unwrap();
+        let source = work.join("fixture.rs");
+        let fixture = work.join("fixture");
+        fs::write(&source, "fn main() {}\n").unwrap();
+        assert!(Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&fixture)
+            .status()
+            .unwrap()
+            .success());
         let make = |dir: &Path, version: &str| {
             let app = dir.join("Horizon.app");
             fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
             fs::create_dir_all(app.join("Contents/Resources")).unwrap();
             let bin = app.join("Contents/MacOS/horizon-launcher");
-            fs::copy("/usr/bin/true", &bin).unwrap();
+            fs::copy(&fixture, &bin).unwrap();
             fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
             fs::write(app.join("Contents/Resources/version"), version).unwrap();
             fs::write(
@@ -5094,9 +5032,11 @@ pub fn {f}("
         let version = fs::read_to_string(installed.join("Contents/Resources/version")).unwrap();
         assert_eq!(version, "2.0.0");
         let bin = installed.join("Contents/MacOS/horizon-launcher");
+        let executed = Command::new(&bin).status().unwrap();
         assert!(
-            Command::new(&bin).status().unwrap().success(),
-            "still executable"
+            executed.success(),
+            "updated native fixture failed: {executed}; mode {:o}",
+            fs::metadata(&bin).unwrap().permissions().mode()
         );
         let valid = Command::new("codesign")
             .args(["--verify", "--strict"])

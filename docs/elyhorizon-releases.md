@@ -118,3 +118,26 @@ This verifies registration and packaged configuration, not human browser consent
 Complete the manual clean-Windows sign-in and refresh checklist in
 [the Ely.by guide](elyby-account.md#provider-support-and-verification) before marking
 a release's authentication end-to-end verified. No separately hosted backend is needed.
+
+## Clean-profile regression gate
+
+Each platform runs `tools/check_launcher_package.py` against the actual installed/extracted
+programs. The script creates disposable homes and a disposable working directory, removes all
+inherited `HORIZON_*` settings, disables self-updates/audio/telemetry, verifies the embedded public
+S256 configuration, starts the account list twice, and starts the bundled game's help command.
+It does not read an existing player's account list or delete an existing installation.
+
+The existing `tools/check_ely_oauth.py` preflight remains mandatory before packaging. A missing
+variable, wrong application ID, rejected public-client exchange or missing PKCE support stops the
+release job. `invalid_client` now includes the public ID and HTTP status, without provider bodies.
+Do not work around that failure using a secret. All four platform entries retain the Microsoft
+public ID from `vars.HORIZON_MSA_CLIENT_ID`.
+
+The macOS update regression compiles its own native Rust executable as its bundle fixture rather
+than re-signing a copy of Apple's system `/usr/bin/true`. The test still performs signing, ZIP
+extraction, bundle replacement, execution, signature verification and tamper rejection. A failing
+fixture now reports its exit status and mode. Both macOS architectures still need native CI
+execution; Windows checks cannot establish that those tests pass on Apple hardware.
+
+For the complete manual release checklist and the limits of offline checks, see
+[0.2.2 verification](elyhorizon-0.2.2-verification.md).

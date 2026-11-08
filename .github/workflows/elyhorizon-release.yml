@@ -73,6 +73,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - name: Test offline release validators
+        run: python -m unittest tests.test_ely_oauth_release tests.test_launcher_package
       - name: Require a valid public Ely.by Desktop registration
         run: python tools/check_ely_oauth.py
       - uses: Swatinem/rust-cache@v2
@@ -144,6 +146,8 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $auth.client_id -ne $expectedClientId -or $auth.bundled_client_id -ne $expectedClientId -or $auth.flow -ne 'authorization_code_pkce' -or $auth.client_secret_required -ne $false) {
             throw 'Installed launcher is missing its public PKCE configuration'
           }
+          python tools/check_launcher_package.py --launcher (Join-Path $installed 'horizon-launcher.exe') --client (Join-Path $installed 'horizon-client.exe') --client-id $expectedClientId
+          if ($LASTEXITCODE -ne 0) { throw 'Installed clean-home smoke test failed' }
           $process = Start-Process -FilePath (Join-Path $installed 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -WindowStyle Hidden -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Uninstaller failed: $($process.ExitCode)" }
           foreach ($name in @('horizon-launcher.exe', 'horizon-client.exe')) {
@@ -202,6 +206,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - name: Test offline release validators
+        run: python -m unittest tests.test_ely_oauth_release tests.test_launcher_package
       - name: Require a valid public Ely.by Desktop registration
         run: python tools/check_ely_oauth.py
       - uses: dtolnay/rust-toolchain@stable
@@ -260,6 +266,8 @@ jobs:
           cp target/release/horizon-client "$extracted/patched-client"
           patchelf --set-rpath '$ORIGIN/../lib' "$extracted/patched-client"
           cmp "$extracted/patched-client" "$appdir/squashfs-root/usr/bin/horizon-client"
+          python tools/check_launcher_package.py --launcher "$extracted/Elyhorizon/horizon-launcher" --client "$extracted/Elyhorizon/horizon-client" --client-id "$expected"
+          python tools/check_launcher_package.py --launcher "$image" --appimage --client "$appdir/squashfs-root/usr/bin/horizon-client" --client-id "$expected"
       - name: Check AppImage startup on Arch Linux
         run: |
           set -euo pipefail
@@ -341,6 +349,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - name: Test offline release validators
+        run: python -m unittest tests.test_ely_oauth_release tests.test_launcher_package
       - name: Require a valid public Ely.by Desktop registration
         run: python tools/check_ely_oauth.py
       - uses: dtolnay/rust-toolchain@stable
@@ -385,6 +395,7 @@ jobs:
           "$installed/Elyhorizon.app/Contents/MacOS/horizon-launcher" --json account ely-status > macos-auth.json
           jq -e --arg id "$expected" '.client_id == $id and .bundled_client_id == $id and .flow == "authorization_code_pkce" and .client_secret_required == false' macos-auth.json
           "$installed/Elyhorizon.app/Contents/MacOS/horizon-client" --help > /dev/null
+          python tools/check_launcher_package.py --launcher "$installed/Elyhorizon.app/Contents/MacOS/horizon-launcher" --client "$installed/Elyhorizon.app/Contents/MacOS/horizon-client" --client-id "$expected"
       - name: Checksum macOS release files
         run: |
           cd dist

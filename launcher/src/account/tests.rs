@@ -459,16 +459,16 @@ fn a_no_from_the_services_blocks_at_once() {
     assert!(accounts.has_owner(&store));
     assert_eq!(
         launch(&ep, Some("test-client"), &store, &mut accounts).unwrap_err(),
-        NoOwner
+        NoOwner::default()
     );
     // The answer is kept beside the tokens: offline now, it still says no.
     assert!(!kept(&store).owns && !accounts.has_owner(&store));
     assert_eq!(
         launch(&offline(), Some("test-client"), &store, &mut accounts).unwrap_err(),
-        NoOwner
+        NoOwner::default()
     );
     assert_eq!(
-        NoOwner.to_string(),
+        NoOwner::default().to_string(),
         "Sign in with a Microsoft account that owns Minecraft: Java Edition to play."
     );
 }
@@ -562,10 +562,10 @@ fn the_developer_option_off_is_the_owner_gate() {
     assert_eq!(accounts, Accounts::default());
     let (_, ep) = mock(|m| m.owns_game = false);
     let refused = launch_for_game(&ep, Some("test-client"), &store, &mut accounts, false);
-    assert_eq!(refused.unwrap_err(), NoOwner);
+    assert_eq!(refused.unwrap_err(), NoOwner::default());
     let mut accounts = signed_in(&store, &secrets("mc-token", true));
     let refused = launch_for_game(&ep, Some("test-client"), &store, &mut accounts, false);
-    assert_eq!(refused.unwrap_err(), NoOwner);
+    assert_eq!(refused.unwrap_err(), NoOwner::default());
 }
 
 #[test]
@@ -1099,7 +1099,7 @@ fn the_java_edition_plays_as_an_owner_even_offline() {
     let mut accounts = signed_in(&store, &secrets("mc-token", false));
     assert_eq!(
         java_player_with(&offline(), Some("test-client"), &store, &mut accounts).unwrap_err(),
-        NoOwner.to_string()
+        NoOwner::default().to_string()
     );
 }
 
@@ -1153,7 +1153,11 @@ fn the_secrets_file_keeps_sign_ins_across_starts() {
     // No temporary file left behind.
     assert_eq!(
         files_beside(&path),
-        ["account-secrets.json", "account-secrets.lock"]
+        [
+            "account-secrets.json",
+            "account-secrets.key",
+            "account-secrets.lock"
+        ]
     );
     // Signing the last account out removes the file.
     accounts.remove(&again, UUID).unwrap();
@@ -1174,7 +1178,7 @@ fn a_broken_secrets_file_is_an_error_that_never_shows_it() {
         "[\"leaked-secret\"]",
     ] {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let sealed = super::seal(broken.as_bytes()).unwrap();
+        let sealed = super::seal(broken.as_bytes(), &store.file_key(true).unwrap()).unwrap();
         std::fs::write(&path, &sealed).unwrap();
         let said = store.get("a").unwrap_err();
         assert!(!said.contains("leaked-secret"), "{said}");
@@ -1270,7 +1274,11 @@ fn processes_sharing_the_secrets_file_lose_nothing() {
     assert_eq!(store.get("signed-out").unwrap(), None);
     assert_eq!(
         files_beside(&path),
-        ["account-secrets.json", "account-secrets.lock"]
+        [
+            "account-secrets.json",
+            "account-secrets.key",
+            "account-secrets.lock"
+        ]
     );
     remove_secrets_dir(&path);
 }
@@ -2103,4 +2111,74 @@ fn a_launch_as_another_account_leaves_the_selected_one() {
     );
     assert_eq!(gone.unwrap_err(), "That account isn't signed in.");
     assert_eq!(accounts.player(), Player::Microsoft(UUID.into()));
+}
+
+#[test]
+fn ely_launch_preserves_identity_without_microsoft_ownership_and_keeps_provider_errors() {
+    let store = MemoryStore::default();
+    let account = Account {
+        uuid: format!("ely:{UUID}"),
+        name: "ElyPlayer".into(),
+        skin: None,
+        cape: None,
+    };
+    let credential = Secrets {
+        ely: true,
+        ely_oauth: true,
+        ..secrets("ely-game-token", false)
+    };
+    let mut accounts = Accounts::default();
+    accounts.add(&store, account.clone(), &credential).unwrap();
+    let pass =
+        launch_for_game_with_refresh(&offline(), None, &store, &mut accounts, false, &|a, s| {
+            Check::Owns(a.clone(), s)
+        })
+        .unwrap();
+    assert!(pass.owner.is_none());
+    let (played, secret) = pass.session.unwrap();
+    assert_eq!(played.uuid, account.uuid);
+    assert_eq!(played.name, "ElyPlayer");
+    assert!(!secret.owns && secret.ely && secret.minecraft_token == "ely-game-token");
+    let refused = launch_for_game_with_refresh(
+        &offline(),
+        None,
+        &store,
+        &mut accounts,
+        false,
+        &|_, mut s| {
+            s.sign_in_required = true;
+            Check::NoAnswer("Ely.by token exchange returned HTTP 401.".into(), s)
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "Ely.by token exchange returned HTTP 401."
+    );
+    assert_eq!(accounts.selected.as_deref(), Some(account.uuid.as_str()));
+}
+
+#[test]
+fn file_store_keys_are_independent_and_legacy_sessions_migrate_without_losing_accounts() {
+    let path = secrets_file("key-migration");
+    let store = FileStore::new(path.clone());
+    let legacy = seal(br#"{"legacy":"kept-token"}"#, &legacy_file_key()).unwrap();
+    let mut legacy_bytes = LEGACY_SEALED.to_vec();
+    legacy_bytes.extend_from_slice(&legacy[SEALED.len()..]);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, legacy_bytes).unwrap();
+    assert_eq!(store.get("legacy").unwrap().as_deref(), Some("kept-token"));
+    store.set("new", "new-token").unwrap();
+    assert!(std::fs::read(&path).unwrap().starts_with(SEALED));
+    assert_eq!(store.get("legacy").unwrap().as_deref(), Some("kept-token"));
+    let other_path = secrets_file("independent-key");
+    let other = FileStore::new(other_path.clone());
+    other.set("other", "other-token").unwrap();
+    let copied = std::fs::read(&path).unwrap();
+    std::fs::write(&other_path, &copied).unwrap();
+    assert!(other.get("legacy").is_err());
+    assert!(other.set("replacement", "must-not-overwrite").is_err());
+    assert_eq!(std::fs::read(&other_path).unwrap(), copied);
+    remove_secrets_dir(&other_path);
+    remove_secrets_dir(&path);
 }

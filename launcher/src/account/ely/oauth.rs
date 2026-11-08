@@ -190,12 +190,42 @@ impl BrowserFlow {
         url.into()
     }
 
-    pub fn finish(self, cancelled: &dyn Fn() -> bool) -> Result<(Account, Secrets), String> {
-        let code = self.wait_code(cancelled, Duration::from_secs(300))?;
+    pub fn finish(
+        self,
+        cancelled: &dyn Fn() -> bool,
+        save: impl FnOnce(Account, Secrets) -> Result<Account, String>,
+    ) -> Result<Account, String> {
+        self.complete_callback(cancelled, Duration::from_secs(300), |pair| {
+            let (account, secrets) = with_textures(AUTH_SERVER, pair);
+            save(account, secrets)
+        })
+    }
+
+    fn complete_callback<T>(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+        timeout: Duration,
+        save: impl FnOnce((Account, Secrets)) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let (code, mut browser) = self.wait_code(cancelled, timeout)?;
         if cancelled() {
+            reply(&mut browser, 200, "Sign-in cancelled.");
             return Err(crate::i18n::tr("Sign-in cancelled.").into());
         }
-        Ok(with_textures(AUTH_SERVER, self.exchange_code(&code)?))
+        let result = self.exchange_code(&code).and_then(save);
+        match &result {
+            Ok(_) => reply(
+                &mut browser,
+                200,
+                "Login successful! Returning to Elyhorizon...",
+            ),
+            Err(_) => reply(
+                &mut browser,
+                502,
+                "Sign-in could not be completed. Return to Elyhorizon for details.",
+            ),
+        }
+        result
     }
 
     fn exchange_code(&self, code: &str) -> Result<(Account, Secrets), String> {
@@ -213,7 +243,11 @@ impl BrowserFlow {
         Ok((account, secrets))
     }
 
-    fn wait_code(&self, cancelled: &dyn Fn() -> bool, timeout: Duration) -> Result<String, String> {
+    fn wait_code(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+        timeout: Duration,
+    ) -> Result<(String, TcpStream), String> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             if cancelled() {
@@ -224,17 +258,24 @@ impl BrowserFlow {
                     let result = callback(&mut stream, &self.config.redirect, &self.state);
                     match result {
                         Callback::Code(code) => {
-                            reply(&mut stream, 200);
-                            return Ok(code);
+                            return Ok((code, stream));
                         }
                         Callback::Denied => {
-                            reply(&mut stream, 200);
+                            reply(
+                                &mut stream,
+                                200,
+                                "Ely.by sign-in was declined in the browser.",
+                            );
                             return Err(crate::i18n::tr(
                                 "Ely.by sign-in was declined in the browser.",
                             )
                             .into());
                         }
-                        Callback::Ignore => reply(&mut stream, 400),
+                        Callback::Ignore => reply(
+                            &mut stream,
+                            400,
+                            "Invalid Ely.by callback. Return to Elyhorizon and try again.",
+                        ),
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -257,9 +298,43 @@ enum Callback {
     Ignore,
 }
 
+fn callback_headers(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    stream.set_nonblocking(true).ok()?;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut headers = Vec::new();
+    let result = loop {
+        if Instant::now() >= deadline || headers.len() >= 8192 {
+            break None;
+        }
+        let mut bytes = [0u8; 1024];
+        match stream.read(&mut bytes) {
+            Ok(0) => break None,
+            Ok(n) => {
+                headers.extend_from_slice(&bytes[..n]);
+                if headers.len() > 8192 {
+                    break None;
+                }
+                if headers.windows(4).any(|s| s == b"\r\n\r\n") {
+                    break Some(headers);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5))
+            }
+            Err(_) => break None,
+        }
+    };
+    let _ = stream.set_nonblocking(false);
+    result
+}
+
 fn callback(stream: &mut TcpStream, redirect: &Url, state: &str) -> Callback {
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    let mut reader = std::io::BufReader::new(stream.take(8192));
+    // A per-read socket timeout alone permits a local slowloris to extend the
+    // five-minute flow deadline indefinitely. Bound the entire HTTP header read.
+    let Some(headers) = callback_headers(stream) else {
+        return Callback::Ignore;
+    };
+    let mut reader = std::io::BufReader::new(headers.as_slice());
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() {
         return Callback::Ignore;
@@ -274,7 +349,35 @@ fn callback(stream: &mut TcpStream, redirect: &Url, state: &str) -> Callback {
     else {
         return Callback::Ignore;
     };
-    let Ok(url) = redirect.join(target) else {
+    let target = target.to_owned();
+    if !matches!(parts.next(), Some("HTTP/1.1" | "HTTP/1.0")) || parts.next().is_some() {
+        return Callback::Ignore;
+    }
+    let mut hosts = Vec::new();
+    loop {
+        let mut header = String::new();
+        if reader
+            .read_line(&mut header)
+            .ok()
+            .filter(|n| *n > 0)
+            .is_none()
+        {
+            return Callback::Ignore;
+        }
+        if header == "\r\n" {
+            break;
+        }
+        let Some((name, value)) = header.split_once(':') else {
+            return Callback::Ignore;
+        };
+        if name.eq_ignore_ascii_case("host") {
+            hosts.push(value.trim().to_owned());
+        }
+    }
+    if hosts != [format!("127.0.0.1:{}", redirect.port().unwrap_or(80))] {
+        return Callback::Ignore;
+    }
+    let Ok(url) = redirect.join(&target) else {
         return Callback::Ignore;
     };
     if url.origin() != redirect.origin() || url.path() != redirect.path() {
@@ -293,6 +396,14 @@ fn callback(stream: &mut TcpStream, redirect: &Url, state: &str) -> Callback {
             Some(first)
         }
     };
+    if ["state", "iss", "code", "error"]
+        .iter()
+        .any(|name| pairs.iter().filter(|(key, _)| key == name).count() > 1)
+        || (only("code").is_some() && only("error").is_some())
+        || url.fragment().is_some()
+    {
+        return Callback::Ignore;
+    }
     if only("state") != Some(state) || only("iss") != Some("https://account.ely.by") {
         return Callback::Ignore;
     }
@@ -305,10 +416,9 @@ fn callback(stream: &mut TcpStream, redirect: &Url, state: &str) -> Callback {
     }
 }
 
-fn reply(stream: &mut TcpStream, status: u16) {
+fn reply(stream: &mut TcpStream, status: u16, message: &str) {
     let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-    let body =
-        crate::i18n::tr("Return to Elyhorizon to finish sign-in. You can close this browser tab.");
+    let body = crate::i18n::tr(message);
     let _ = write!(stream, "HTTP/1.1 {status} Response\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'\r\nConnection: close\r\n\r\n{body}", body.len());
 }
 
@@ -318,14 +428,80 @@ fn token_request<'a>(
 ) -> Result<(u16, Value), String> {
     fields.push(("client_id", &config.client_id));
 
-    send(
+    oauth_send(
         oauth_request("POST", &config.token_url),
         Some(Body::Form(fields)),
-        "Ely.by",
+        "Ely.by token exchange",
     )
-    .map_err(|_| {
-        crate::i18n::tr("Could not reach Ely.by. Check your internet connection.").to_owned()
-    })
+}
+
+// Keep provider bodies and transport URLs private: either can echo a bearer token/code.
+fn oauth_send(
+    request: ureq::Request,
+    body: Option<Body>,
+    operation: &str,
+) -> Result<(u16, Value), String> {
+    let result = match body {
+        Some(Body::Form(fields)) => request.send_form(&fields),
+        Some(Body::Json(value)) => request.send_json(value),
+        None => request.call(),
+    };
+    let response = match result {
+        Ok(response) | Err(ureq::Error::Status(_, response)) => response,
+        Err(ureq::Error::Transport(error)) => {
+            let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+            let mut timeout = false;
+            while let Some(error) = source {
+                timeout |= error.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                    matches!(
+                        io.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    )
+                });
+                source = error.source();
+            }
+            return Err(crate::i18n::trf(
+                if timeout {
+                    "{operation} timed out. Try again."
+                } else {
+                    "{operation} could not connect. Check your network and proxy settings."
+                },
+                &[("operation", crate::i18n::tr(operation))],
+            ));
+        }
+    };
+    let status = response.status();
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(65537)
+        .read_to_end(&mut bytes)
+        .map_err(|_| {
+            crate::i18n::trf(
+                "{operation} response was interrupted. Try again.",
+                &[("operation", crate::i18n::tr(operation))],
+            )
+        })?;
+    if bytes.len() > 65536 {
+        return Err(crate::i18n::trf(
+            "{operation} returned an oversized response.",
+            &[("operation", crate::i18n::tr(operation))],
+        ));
+    }
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    if status != 200 {
+        eprintln!(
+            "{}",
+            crate::i18n::trf(
+                "{operation} returned HTTP {status}.",
+                &[
+                    ("operation", crate::i18n::tr(operation)),
+                    ("status", &status.to_string())
+                ]
+            )
+        );
+    }
+    Ok((status, value))
 }
 
 // Authorization codes, verifiers and bearer tokens must never follow HTTP redirects.
@@ -353,12 +529,13 @@ fn tokens(status: u16, value: &Value, previous: Option<&Secrets>) -> Result<Secr
         if value.get("error").and_then(Value::as_str) == Some("invalid_client") {
             return Err(crate::i18n::tr("Ely.by rejected this application. The release must use a registered public Desktop application ID, not a Website application.").into());
         }
-        return Err(crate::i18n::tr(if matches!(status, 400 | 401 | 403) {
-            EXPIRED
-        } else {
-            "Ely.by is unavailable. Try again later."
-        })
-        .into());
+        if matches!(status, 400 | 401 | 403) {
+            return Err(crate::i18n::tr(EXPIRED).into());
+        }
+        return Err(crate::i18n::trf(
+            "Ely.by token exchange returned HTTP {status}. Try again later.",
+            &[("status", &status.to_string())],
+        ));
     }
     let malformed =
         || crate::i18n::tr("Could not read the Ely.by browser sign-in response.").to_owned();
@@ -393,17 +570,25 @@ fn tokens(status: u16, value: &Value, previous: Option<&Secrets>) -> Result<Secr
 }
 
 fn profile(config: &Config, token: &str) -> Result<Account, String> {
-    let (status, value) = send(
+    let (status, value) = oauth_send(
         bearer(oauth_request("GET", &config.info_url), token),
         None,
-        "Ely.by",
+        "Ely.by profile request",
     )?;
     if status == 401 || status == 403 {
         return Err(crate::i18n::tr(EXPIRED).into());
     }
-    let invalid = || crate::i18n::tr("Could not read the Ely.by profile.").to_owned();
+    let invalid = || {
+        crate::i18n::tr(
+            "Ely.by profile response did not contain a valid UUID and Minecraft player name.",
+        )
+        .to_owned()
+    };
     if status != 200 {
-        return Err(invalid());
+        return Err(crate::i18n::trf(
+            "Ely.by profile request returned HTTP {status}. Try again later.",
+            &[("status", &status.to_string())],
+        ));
     }
     let uuid = str_field(&value, "uuid")
         .ok_or_else(invalid)?
@@ -412,7 +597,8 @@ fn profile(config: &Config, token: &str) -> Result<Account, String> {
     let name = str_field(&value, "username").ok_or_else(invalid)?;
     if uuid.len() != 32
         || !uuid.bytes().all(|b| b.is_ascii_hexdigit())
-        || !valid_offline_name(&name)
+        || !(1..=16).contains(&name.len())
+        || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
     {
         return Err(invalid());
     }
@@ -648,7 +834,12 @@ mod tests {
     fn request(flow: &BrowserFlow, target: &str) -> Callback {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        write!(client, "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+        write!(
+            client,
+            "GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+            flow.config.redirect.port().unwrap()
+        )
+        .unwrap();
         let (mut stream, _) = listener.accept().unwrap();
         callback(&mut stream, &flow.config.redirect, &flow.state)
     }
@@ -807,5 +998,94 @@ mod tests {
             None
         )
         .is_err());
+    }
+    #[test]
+    fn documented_profiles_allow_short_names_and_errors_do_not_echo_private_bodies() {
+        let (config, worker) = api(vec![(
+            200,
+            json!({"uuid":"ffc8fdc9-5824-509e-8a57-c99b940fb996", "username":"Ab"}),
+        )]);
+        assert_eq!(profile(&config, "private-access").unwrap().name, "Ab");
+        worker.join().unwrap();
+        for (status, body) in [
+            (503, json!({"error":"private-access"})),
+            (200, json!({"uuid":"invalid", "username":"private-access"})),
+        ] {
+            let (config, worker) = api(vec![(status, body)]);
+            let error = profile(&config, "private-access").unwrap_err();
+            assert!(!error.contains("private-access"));
+            if status == 503 {
+                assert!(error.contains("HTTP 503"));
+            }
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn invalid_callbacks_and_denial_never_produce_a_success_page() {
+        let flow = BrowserFlow::new(config()).unwrap();
+        let host = flow.config.redirect.port().unwrap();
+        let state = flow.state.clone();
+        for query in [
+            format!("state={state}&iss=https://account.ely.by&code=one&code=two"),
+            format!("state={state}&iss=https://account.ely.by&code=one&error=access_denied"),
+            format!("state={state}&iss=https://account.ely.by&code=one#error=ignored"),
+        ] {
+            assert!(matches!(
+                request(&flow, &format!("/oauth/ely?{query}")),
+                Callback::Ignore
+            ));
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        write!(client, "GET /oauth/ely?state={state}&iss=https://account.ely.by&code=one HTTP/1.1\r\nHost: evil.example:{host}\r\n\r\n").unwrap();
+        let (mut socket, _) = listener.accept().unwrap();
+        assert!(matches!(
+            callback(&mut socket, &flow.config.redirect, &state),
+            Callback::Ignore
+        ));
+    }
+
+    #[test]
+    fn browser_success_is_sent_only_after_token_exchange_and_profile_succeed() {
+        for (profile_status, can_save, succeeds) in
+            [(200, true, true), (503, true, false), (200, false, false)]
+        {
+            let (config, worker) = api(vec![
+                (
+                    200,
+                    json!({"access_token":"private-access", "refresh_token":"private-refresh", "expires_in":86400}),
+                ),
+                (
+                    profile_status,
+                    json!({"uuid":"ffc8fdc9-5824-509e-8a57-c99b940fb996", "username":"ElyPlayer"}),
+                ),
+            ]);
+            let flow = BrowserFlow::new(config).unwrap();
+            let address = flow.listener.local_addr().unwrap();
+            let state = flow.state.clone();
+            let browser = std::thread::spawn(move || {
+                let mut socket = TcpStream::connect(address).unwrap();
+                write!(socket, "GET /oauth/ely?state={state}&iss=https://account.ely.by&code=private-code HTTP/1.1\r\nHost: {address}\r\n\r\n").unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut text = String::new();
+                socket.read_to_string(&mut text).unwrap();
+                text
+            });
+            let result = flow.complete_callback(&|| false, Duration::from_secs(2), |pair| {
+                if can_save {
+                    Ok(pair)
+                } else {
+                    Err("Account could not be saved".into())
+                }
+            });
+            assert_eq!(result.is_ok(), succeeds);
+            let page = browser.join().unwrap();
+            assert_eq!(page.contains("Login successful!"), succeeds);
+            assert!(!page.contains("private-access") && !page.contains("private-code"));
+            worker.join().unwrap();
+        }
     }
 }

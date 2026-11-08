@@ -48,6 +48,8 @@ def check(client_id, send=request):
     fields = dict(client_id=client_id.strip(), redirect_uri="http://127.0.0.1:43210/oauth/ely",
                   response_type="code", scope=SCOPES, state=secrets.token_urlsafe(32))
     status, value = send("/api/oauth2/v1/validate", fields)
+    if value.get("error") == "invalid_client":
+        raise ValueError(f"Ely.by returned HTTP {status} invalid_client for the configured public Client ID {client_id.strip()!r}. Verify this exact ID in the Ely.by Desktop registration; no client secret will be used.")
     if status != 400 or value.get("parameter") != "code_challenge":
         raise ValueError("Ely.by did not require PKCE for this ID. Register a Desktop application, not the old Website application (elyhorizon2).")
     pkce = dict(fields, code_challenge=challenge, code_challenge_method="S256")

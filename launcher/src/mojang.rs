@@ -125,19 +125,9 @@ pub fn download(
         .and_then(|_| objects(&read_json(&index.path)?, dir))
         .and_then(|objects| {
             log(format!("Downloading the sounds ({} files)", objects.len()));
-            // A connection that fails now and then is tried again, and a file that still fails
-            // does not stop the others: the next download fetches what is left.
-            let retrying = |url: &str| {
-                let mut got = fetch(url);
-                for _ in 0..2 {
-                    if got.is_ok() {
-                        break;
-                    }
-                    got = fetch(url);
-                }
-                got
-            };
-            fetch_each(&objects, jobs, &retrying, cancel, log, false)
+            // The shared GET client owns bounded backoff/retries; do not multiply
+            // its attempts here or retry permanent errors. Keep all verified objects.
+            fetch_each(&objects, jobs, fetch, cancel, log, false)
         });
     match assets {
         Err(e) if e == CANCELLED => return Err(e),

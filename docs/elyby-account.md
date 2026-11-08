@@ -140,3 +140,23 @@ Protocol references (documentation only):
 - https://docs.ely.by/en/minecraft-auth.html
 - https://docs.ely.by/en/skins-system.html
 - https://docs.ely.by/en/authlib-injector.html
+
+## Diagnostics and clean-install checks
+
+See [the 0.2.2 stabilization report and verification checklist](elyhorizon-0.2.2-verification.md).
+The configured public ID for new builds is `elyhorizondesktop`, supplied through the existing
+Actions Variable `HORIZON_ELY_CLIENT_ID`. On 2026-11-08 the provider rejected that exact ID
+with HTTP 401 `invalid_client`; this is distinct from the older spelling used in the historical
+verification above. No fallback to another application's ID or secret is performed.
+
+A callback now receives **Login successful! Returning to Elyhorizon...** only after token exchange,
+profile validation, expected-account checks and account persistence succeed. The GUI restores its
+existing window once for the completed Ely login. Windows uses `ShowWindowAsync`,
+`SetForegroundWindow` and taskbar attention without input simulation; macOS/Linux use the window
+backend's activation/attention APIs. OS/compositor focus restrictions still apply, especially under
+Wayland. A failed callback, declined login or failed save does not request activation.
+
+The profile parser accepts the documented `uuid` and `username` fields, including existing
+one/two-character Minecraft names. Malformed profiles, HTTP errors, interrupted responses and
+network failures have separate diagnostics. Untrusted response bodies and secret URL parameters
+are never copied into error messages. OAuth token POSTs are not automatically replayed.
