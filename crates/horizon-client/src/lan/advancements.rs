@@ -143,6 +143,12 @@ impl ServerAdvancements {
         }
     }
 
+    /// `RecipeManager.getRecipeFromDisplay`: the recipe a display id names,
+    /// for `ServerRecipeBook.removeHighlight`.
+    pub fn recipe_of_display(&self, display: i32) -> Option<&str> {
+        self.displays.recipe_of_display(display)
+    }
+
     /// `PlayerAdvancements.reload` (`PlayerList.reloadResources`): the
     /// progress is read again against the new tree (`applyFrom` ignores an
     /// advancement that no longer exists and `AdvancementProgress.update`
@@ -259,6 +265,16 @@ impl ServerAdvancements {
         }
         w.bool(show);
         Some(w.data)
+    }
+
+    /// `ServerAdvancementManager.get` then `PlayerAdvancements.setSelectedTab`:
+    /// `None` when the server has no advancement `id` (the tab is left as it
+    /// is), else whether a player may keep it as its tab (a root that has a
+    /// display).
+    pub fn selectable(&self, id: &str) -> Option<bool> {
+        self.tree
+            .get(id)
+            .map(|a| a.parent.is_none() && a.display.is_some())
     }
 
     /// Which advancements a player with `progress` may see.
@@ -789,6 +805,37 @@ mod tests {
     }
 
     #[test]
+    fn an_owned_content_recipe_reaches_the_client_book() {
+        let recipe = r#"{"type":"minecraft:crafting_shapeless","ingredients":["minecraft:raw_copper"],"result":{"id":"minecraft:copper_ingot","count":2}}"#;
+        let root = resources("content_namespace", &[("control", recipe)]);
+        let dir = root.join("data/recipe_pilot/recipe");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("press.json"), recipe).unwrap();
+        for marker in [
+            horizon_items::content_namespaces::MARKER,
+            horizon_items::content_namespaces::MOD_IDS_MARKER,
+        ] {
+            std::fs::write(root.join(marker), br#"["recipe_pilot"]"#).unwrap();
+        }
+        let (sync, e) = entry(&root, "recipe_pilot:press");
+        assert_eq!(
+            e.id,
+            sync.advancements
+                .displays
+                .first_display("recipe_pilot:press")
+                .unwrap()
+        );
+        match e.display {
+            RecipeDisplay::Shapeless { result, .. } => {
+                assert_eq!(result, SlotDisplay::ItemStack(Stack::new(1, 2)));
+            }
+            other => panic!("not a shapeless content recipe: {other:?}"),
+        }
+        let _ = entry(&root, "minecraft:control");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn a_recipe_with_an_unknown_ingredient_kind_stays_out_of_the_book() {
         let root = resources(
             "mymod_kind",
@@ -865,6 +912,93 @@ mod tests {
         assert!(len >= 2, "an item list, not empty ({len}) nor a tag");
         assert_eq!(len - 1, 1, "the compound's one item");
         assert_eq!(r.varint().unwrap(), raw);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The stonecutter's recipes go out in registration order (path, then
+    /// namespace): a guest's button picks by position in the host's list,
+    /// which keeps that order too.
+    #[test]
+    fn update_recipes_lists_the_stonecutter_in_registration_order() {
+        let cut = |input: &str| {
+            format!(
+                r#"{{"type":"minecraft:stonecutting","ingredient":"{input}",
+                "result":{{"id":"minecraft:copper_ingot"}}}}"#
+            )
+        };
+        let vanilla = cut("minecraft:raw_copper");
+        let root = resources("stonecutter_order", &[("z_cut", vanilla.as_str())]);
+        let packs = [(
+            "recipe/pack:a_cut".to_owned(),
+            vec![cut("minecraft:redstone").into_bytes()],
+        )];
+        let sync =
+            SyncData::load(&root, &horizon_world::loot::PackOverlay { files: &packs }).unwrap();
+        let item = |n: &str| sync.id("minecraft:item", n).unwrap();
+        let mut r = Reader::new(&sync.recipes);
+        for _ in 0..r.varint().unwrap() {
+            r.string(64).unwrap();
+            for _ in 0..r.varint().unwrap() {
+                r.varint().unwrap();
+            }
+        }
+        let mut inputs = Vec::new();
+        for _ in 0..r.varint().unwrap() {
+            // An item list (its length plus one), then the result's slot
+            // display: its type, item, count and two empty component lists.
+            let len = r.varint().unwrap();
+            inputs.push((1..len).map(|_| r.varint().unwrap()).collect::<Vec<_>>());
+            for _ in 0..5 {
+                r.varint().unwrap();
+            }
+        }
+        assert_eq!(
+            inputs,
+            [
+                vec![item("minecraft:redstone")],
+                vec![item("minecraft:raw_copper")]
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `RecipeManager.getRecipeFromDisplay`, which
+    /// `handleRecipeBookSeenRecipePacket` asks: the display ids are numbered
+    /// over the recipes in id order, so display 0 is the first recipe and the
+    /// id past the last display names nothing.
+    #[test]
+    fn a_display_id_names_the_recipe_it_was_numbered_for() {
+        let root = resources(
+            "seen_display",
+            &[
+                (
+                    "aaa_shaped",
+                    r#"{"type":"minecraft:crafting_shaped","pattern":["X"],
+                        "key":{"X":"minecraft:raw_copper"},
+                        "result":{"id":"minecraft:copper_ingot"}}"#,
+                ),
+                (
+                    "bbb_smelting",
+                    r#"{"type":"minecraft:smelting","cookingtime":200,"experience":0.7,
+                        "ingredient":"minecraft:raw_copper",
+                        "result":{"id":"minecraft:copper_ingot"}}"#,
+                ),
+            ],
+        );
+        let sync = SyncData::load(&root, &horizon_world::loot::PackOverlay::NONE).unwrap();
+        assert_eq!(
+            sync.advancements.recipe_of_display(0),
+            Some("minecraft:aaa_shaped")
+        );
+        assert_eq!(
+            sync.advancements.recipe_of_display(1),
+            Some("minecraft:bbb_smelting")
+        );
+        assert_eq!(
+            sync.advancements.recipe_of_display(2),
+            None,
+            "past the last display"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

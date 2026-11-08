@@ -8,6 +8,8 @@ mod navigation;
 
 use super::event_loop::EventLoopCtl;
 use super::{Game, Screen};
+use horizon_client::actions::Action;
+use horizon_client::held::Source;
 use horizon_client::{
     Result,
     block_entity_anim::Ticker,
@@ -314,6 +316,26 @@ pub(super) enum Handled {
 }
 
 impl Game<'_> {
+    /// The non-air blocks of a box in this world, with counts per block (`blocks`, and `simulation blocks`
+    /// for the server's own world).
+    pub(super) fn blocks_json(&self, lo: [i32; 3], hi: [i32; 3]) -> Value {
+        let mut list = Vec::new();
+        let mut census: BTreeMap<String, u32> = BTreeMap::new();
+        for y in lo[1]..=hi[1] {
+            for z in lo[2]..=hi[2] {
+                for x in lo[0]..=hi[0] {
+                    let state = self.world.block(x, y, z);
+                    if self.res.facts().is_air(state) {
+                        continue;
+                    }
+                    let name = self.res.facts().get(state).name.to_string();
+                    *census.entry(name).or_insert(0) += 1;
+                    list.push(json!([x, y, z, self.state_string(state)]));
+                }
+            }
+        }
+        json!({ "from": lo, "to": hi, "counts": census, "blocks": list })
+    }
     pub(super) fn state_string(&self, state: BlockStateId) -> String {
         let Some(s) = self.pack.assets.registry.state(state) else {
             return "?".into();
@@ -347,6 +369,11 @@ impl Game<'_> {
             self.world.block_entities.get(&(pos[0], pos[1], pos[2]))
         {
             v["sign"] = json!({ "front": sign.front.lines, "back": sign.back.lines });
+        }
+        // A block a piston moves, as this client animates it: its own
+        // PistonMovingBlockEntity, which a block event's moveBlocks made.
+        if let Some((_, piston)) = self.world.moving_pistons.iter().find(|(p, _)| *p == pos) {
+            v["moving"] = json!({ "progress": piston.progress, "extending": piston.extending });
         }
         v
     }
@@ -408,6 +435,7 @@ impl Game<'_> {
         match self.screen {
             Screen::Playing => "playing",
             Screen::GameModeSwitcher => "gamemode-switcher",
+            Screen::EmoteWheel => "emote-wheel",
             Screen::Paused => "paused",
             Screen::Options => "options",
             Screen::Inventory if self.station.is_some() => "station",
@@ -429,6 +457,7 @@ impl Game<'_> {
             Screen::Win => "win",
             Screen::DebugOptions => "debug-options",
             Screen::Mod => "mod",
+            Screen::HudEditor => "hud-editor",
         }
     }
     pub(super) fn inventory_counts(&self) -> BTreeMap<String, i64> {
@@ -455,7 +484,7 @@ impl Game<'_> {
             v["distance"] = json!(dist(eye, hit.point));
             v
         });
-        let entity = self.mob_hit().map(|(i, d)| {
+        let entity = self.mob_hit().map(|(i, d, _)| {
             let m = &self.mobs[i];
             json!({ "id": m.id, "type": m.kind.id, "health": m.health, "distance": d,
                     "pos": [m.position.x, m.position.y, m.position.z] })
@@ -481,7 +510,7 @@ impl Game<'_> {
                 "on_ground": p.ground.on_ground,
                 "flying": p.flying,
                 "fall_flying": p.fall_flying,
-                "sneaking": self.keys.contains(&KeyCode::ShiftLeft),
+                "sneaking": self.keys.held(Action::Sneak),
                 "sprinting": p.sprinting,
                 "fov_modifier": self.view.fov_modifier,
                 "health": p.health.health(),
@@ -496,6 +525,9 @@ impl Game<'_> {
                 "food": p.health.food.food,
                 "saturation": p.health.food.saturation,
                 "shield_cooldown": self.shield_cooldown,
+                // ItemCooldowns.getCooldownPercent of the shield: what this window's hotbar draws
+                // over it (on a server's client, only what the server's Cooldown packets told it).
+                "shield_cooldown_shown": self.cooldowns.percent("minecraft:shield", 0.0),
                 "xp": { "level": self.experience.level, "progress": self.experience.progress, "total": self.experience.total },
                 "effects": self.potions.effects.list.iter().map(|e| json!({ "id": e.id, "duration_ticks": e.duration, "amplifier": e.amplifier })).collect::<Vec<_>>(),
             })
@@ -665,6 +697,7 @@ impl Game<'_> {
                 json!({ "mode": "multiplayer", "disconnected": reason })
             }
             Mode::Multiplayer(_) => json!({ "mode": "multiplayer" }),
+            Mode::Realms(_) => json!({ "mode": "realms" }),
             Mode::MultiplayerWarning { check } => {
                 json!({ "mode": "multiplayer-warning", "check": check })
             }
@@ -889,11 +922,11 @@ impl Game<'_> {
 
     /// A left or right click, as the mouse would.
     fn agent_mouse(&mut self, button: MouseButton, pressed: bool) -> Result<()> {
-        self.play_mouse(button, pressed)
+        self.mouse_mapping(button, pressed, Source::Agent)
     }
     fn release_agent_keys(&mut self) {
         for k in MOVE_KEYS {
-            self.keys.remove(&k);
+            self.keys.release(&k, Source::Agent);
         }
         if self.left {
             let _ = self.agent_mouse(MouseButton::Left, false);
@@ -1036,22 +1069,7 @@ impl Game<'_> {
                 if volume > 32768 {
                     return Err(format!("{volume} blocks; at most 32768 per request").into());
                 }
-                let mut list = Vec::new();
-                let mut census: BTreeMap<String, u32> = BTreeMap::new();
-                for y in lo[1]..=hi[1] {
-                    for z in lo[2]..=hi[2] {
-                        for x in lo[0]..=hi[0] {
-                            let state = self.world.block(x, y, z);
-                            if self.res.facts().is_air(state) {
-                                continue;
-                            }
-                            let name = self.res.facts().get(state).name.to_string();
-                            *census.entry(name).or_insert(0) += 1;
-                            list.push(json!([x, y, z, self.state_string(state)]));
-                        }
-                    }
-                }
-                ok(json!({ "from": lo, "to": hi, "counts": census, "blocks": list }))
+                ok(self.blocks_json(lo, hi))
             }
             "light" => {
                 self.need_world()?;
@@ -1148,7 +1166,7 @@ impl Game<'_> {
                     keys.push(KeyCode::Space);
                 }
                 for &k in &keys {
-                    self.keys.insert(k);
+                    self.keys.press(k, Source::Agent);
                 }
                 let from = self.player.as_ref().map_or(Vec3::ZERO, |p| p.position);
                 let until = Instant::now() + Duration::from_secs_f64(seconds);
@@ -1161,7 +1179,7 @@ impl Game<'_> {
             }
             "jump" => {
                 self.playing()?;
-                self.keys.insert(KeyCode::Space);
+                self.keys.press(KeyCode::Space, Source::Agent);
                 let from_y = self.player.as_ref().map_or(0.0, |p| p.position.y);
                 let release_tick = self.ticks + 3;
                 self.start_task(
@@ -1293,7 +1311,7 @@ impl Game<'_> {
                 }
                 let target = self
                     .mob_hit()
-                    .map(|(i, _)| (self.mobs[i].id, self.mobs[i].health));
+                    .map(|(i, _, _)| (self.mobs[i].id, self.mobs[i].health));
                 if id.is_some() && target.map(|t| t.0) != id {
                     return Err("that entity is out of reach or hidden; get closer".into());
                 }
@@ -1467,7 +1485,7 @@ impl Game<'_> {
             }
             "open-inventory" => {
                 self.playing()?;
-                self.key_pressed(KeyCode::KeyE)?;
+                self.key_pressed(KeyCode::KeyE, KeyCode::KeyE)?;
                 ok(json!({ "ok": true, "screen": self.screen_label() }))
             }
             "click-button" => {
@@ -1637,7 +1655,9 @@ impl Game<'_> {
                 }
                 if text == "\\b" {
                     title.backspace();
-                } else {
+                } else if let Some(result) = self.type_text_field_input(text) {
+                    result?;
+                } else if let Some(title) = self.title.as_mut() {
                     title.type_text(text);
                 }
                 ok(json!({ "ok": true, "menu": self.title_value() }))
@@ -1652,6 +1672,11 @@ impl Game<'_> {
                     .trim_start_matches('/');
                 if text.is_empty() {
                     return Err("command TEXT".into());
+                }
+                // A native mod's command first, as typed chat does; the
+                // server's console cannot run a client mod's command.
+                if self.client_mod_command(text) {
+                    return ok(json!({ "ok": true, "chat": self.ui.chat.recent_lines(5) }));
                 }
                 let command = format!("/{text}");
                 // Single player's console is its server thread's.
@@ -1696,7 +1721,7 @@ impl Game<'_> {
             }
             "pause" => {
                 self.playing()?;
-                self.key_pressed(KeyCode::Escape)?;
+                self.key_pressed(KeyCode::Escape, KeyCode::Escape)?;
                 ok(json!({ "ok": true, "screen": self.screen_label() }))
             }
             "wait" => {
@@ -1882,7 +1907,7 @@ impl Game<'_> {
                     return Some(json!({ "error": why, "position": self.position() }));
                 }
                 for &k in keys.iter() {
-                    self.keys.insert(k);
+                    self.keys.press(k, Source::Agent);
                 }
                 if Instant::now() < *until && !timed_out {
                     return None;
@@ -1909,7 +1934,7 @@ impl Game<'_> {
                 from_y,
             } => {
                 if self.ticks >= *release_tick || timed_out {
-                    self.keys.remove(&KeyCode::Space);
+                    self.keys.release(&KeyCode::Space, Source::Agent);
                     let on_ground = self.player.as_ref().is_some_and(|p| p.ground.on_ground);
                     if on_ground || timed_out {
                         return Some(
@@ -2077,9 +2102,9 @@ impl Game<'_> {
         if d[0].abs() + d[1].abs() > 1e-3 {
             self.yaw = (-d[0]).atan2(d[1]).to_degrees() as f32;
         }
-        self.keys.insert(KeyCode::KeyW);
+        self.keys.press(KeyCode::KeyW, Source::Agent);
         if g.sprint {
-            self.keys.insert(KeyCode::ControlLeft);
+            self.keys.press(KeyCode::ControlLeft, Source::Agent);
         }
         // Step up onto the next block, or out of water.
         let in_water = {
@@ -2094,9 +2119,9 @@ impl Game<'_> {
             g.jump_until = self.ticks + 4;
         }
         if self.ticks < g.jump_until || in_water {
-            self.keys.insert(KeyCode::Space);
+            self.keys.press(KeyCode::Space, Source::Agent);
         } else {
-            self.keys.remove(&KeyCode::Space);
+            self.keys.release(&KeyCode::Space, Source::Agent);
         }
         None
     }

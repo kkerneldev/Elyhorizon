@@ -120,6 +120,16 @@ impl<W: BlockCollisionWorld> BlockCollisionWorld for EntityCollisions<'_, W> {
     ) -> std::result::Result<bool, Self::Error> {
         self.blocks.may_reach_out(chunk, section_y)
     }
+    fn section_is_empty(
+        &mut self,
+        chunk: Self::Chunk,
+        section_y: i32,
+    ) -> std::result::Result<bool, Self::Error> {
+        self.blocks.section_is_empty(chunk, section_y)
+    }
+    fn missing_chunks_stay_missing(&self) -> bool {
+        self.blocks.missing_chunks_stay_missing()
+    }
     fn context_shape(
         &mut self,
         block: CollisionBlock,
@@ -198,7 +208,7 @@ where
         Ok(resolve_world_movement(
             self,
             MovementRequest {
-                entity: EntityIdentity(0),
+                entity: context.entity().unwrap_or(EntityIdentity(0)),
                 context,
                 bounds,
                 movement,
@@ -234,10 +244,23 @@ impl SceneCollisions<'_, '_> {
         on_ground: bool,
         border: Option<(&BorderGeometry, [f64; 2])>,
     ) -> Result<Vec3> {
+        self.resolve_in_border_with(bounds, movement, max_step, on_ground, border, &[])
+    }
+    /// [`Self::resolve_in_border`], also stopped by `entities`: the boxes
+    /// `EntityGetter.getEntityCollisions` gave the moving entity.
+    pub fn resolve_in_border_with(
+        self,
+        bounds: Aabb,
+        movement: Vec3,
+        max_step: f32,
+        on_ground: bool,
+        border: Option<(&BorderGeometry, [f64; 2])>,
+        entities: &[Aabb],
+    ) -> Result<Vec3> {
         let context = self.context(bounds);
         EntityCollisions {
             blocks: self,
-            entities: &[],
+            entities,
             border,
         }
         .resolve_with_context(bounds, movement, max_step, on_ground, context)
@@ -256,7 +279,7 @@ impl SceneCollisions<'_, '_> {
         Ok(resolve_world_movement(
             self,
             MovementRequest {
-                entity: EntityIdentity(0),
+                entity: context.entity().unwrap_or(EntityIdentity(0)),
                 context,
                 bounds,
                 movement,
@@ -277,6 +300,7 @@ impl SceneCollisions<'_, '_> {
         CollisionContext::for_entity(
             CollisionEntity {
                 identity: EntityIdentity(0),
+                kind: horizon_world::collision_context::EntityContextKind::Living,
                 y,
                 descending: false,
                 main_hand: Some(CollisionItem::EMPTY),
@@ -311,6 +335,26 @@ where
     W: BlockCollisionWorld<Error = E> + EntityMovementWorld<Error = E>,
 {
     no_collision_in(world, bounds, true)
+}
+/// `CollisionGetter.noCollision(entity, bounds)`: retain the real entity snapshot.
+pub fn no_collision_with_context<W, E>(
+    world: &mut W,
+    bounds: Aabb,
+    context: CollisionContext<'_>,
+) -> bool
+where
+    W: BlockCollisionWorld<Error = E> + EntityMovementWorld<Error = E>,
+{
+    no_world_collision(
+        world,
+        CollisionCheckRequest {
+            entity: context.entity().unwrap_or(EntityIdentity(0)),
+            context,
+            bounds,
+            candidate_budget: 1_000_000,
+        },
+    )
+    .unwrap_or(false)
 }
 fn no_collision_in<W, E>(world: &mut W, bounds: Aabb, fluids: bool) -> bool
 where
@@ -423,6 +467,26 @@ impl<'w> BlockCollisionWorld for SceneCollisions<'w, '_> {
     /// of the whole registry reads every cell.
     fn may_reach_out(&mut self, chunk: Self::Chunk, section_y: i32) -> io::Result<bool> {
         Ok(self.section_reaches_out(chunk, section_y))
+    }
+    /// From the section's palette: every block it can hold has an empty shape (air, plants).
+    /// A palette of the whole registry, or a section outside the column, is read cell by cell.
+    fn section_is_empty(&mut self, chunk: Self::Chunk, section_y: i32) -> io::Result<bool> {
+        let blocks = usize::try_from(section_y - (chunk.min_y() >> 4))
+            .ok()
+            .and_then(|s| chunk.sections.get(s))
+            .map(|section| &section.blocks);
+        Ok(blocks.is_some_and(|blocks| {
+            !blocks.is_global()
+                && !blocks.maybe_has(|v| {
+                    self.binding
+                        .collision_block(BlockStateId(v))
+                        .map_or(true, |block| !block.empty_shape)
+                })
+        }))
+    }
+    /// The resident columns do not change while a scan runs, and looking one up changes nothing.
+    fn missing_chunks_stay_missing(&self) -> bool {
+        true
     }
     fn is_suffocating(
         &mut self,
@@ -554,6 +618,9 @@ impl BlockCollisionWorld for EmptyCollisions {
     type Chunk = ChunkPos;
     fn collision_chunk(&mut self, _: ChunkPos) -> io::Result<Option<ChunkPos>> {
         Ok(None)
+    }
+    fn missing_chunks_stay_missing(&self) -> bool {
+        true
     }
     fn collision_block(&mut self, _: ChunkPos, _: BlockPos) -> io::Result<CollisionBlock> {
         Err(io::Error::other("no chunk is resident"))

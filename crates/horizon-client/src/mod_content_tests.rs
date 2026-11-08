@@ -2,6 +2,199 @@ use super::*;
 use crate::{assets::Assets, blocks::BlockFacts, items::Items};
 
 #[test]
+#[ignore = "full content root: run explicitly with prepared resources"]
+fn place_block_aliases_keep_the_original_item_in_placement_context() {
+    use horizon_core::{
+        geometry::{Direction, Vec3},
+        position::BlockPos,
+        random::LegacyRandom,
+    };
+    use horizon_mods::content::{Block, Item};
+    use horizon_world::{
+        level::{
+            Behaviours, LevelAccess, LevelEvent, PlaceContext, PlaceOutcome, PlacementContext,
+            Ticks,
+        },
+        loot::PackOverlay,
+        registry::BlockStateId,
+    };
+    use std::{cell::RefCell, collections::HashMap};
+    let Some(base) = std::env::var_os("HORIZON_TEST_RESOURCES")
+        .map(PathBuf::from)
+        .or_else(prepared)
+    else {
+        return;
+    };
+    let scratch =
+        std::env::temp_dir().join(format!("horizon-alias-context-{}", std::process::id()));
+    let mut content = Content::declared("ruby");
+    content
+        .declare(
+            &[Block {
+                id: "ruby:frame".into(),
+                template: "minecraft:stone".into(),
+                item: false,
+                ..Default::default()
+            }],
+            &["empty", "filled"].map(|name| Item {
+                id: format!("ruby:{name}"),
+                template: "minecraft:stick".into(),
+                place_block: Some("ruby:frame".into()),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+    build(
+        &base,
+        &[ContentMod {
+            id: "ruby".into(),
+            content,
+        }],
+        &scratch,
+    )
+    .unwrap();
+    let registry = horizon_world::level::data::load_registry(&scratch).unwrap();
+    let facts = BlockFacts::load(&scratch, &registry).unwrap();
+    let items = Items::load(&scratch, &registry, &facts, &PackOverlay::NONE).unwrap();
+    let b = Behaviours::load(&registry, &scratch).unwrap();
+    let target = registry.default_state("ruby:frame").unwrap();
+    struct Level {
+        air: BlockStateId,
+        blocks: HashMap<BlockPos, BlockStateId>,
+        random: LegacyRandom,
+        asked: RefCell<Vec<String>>,
+        client: bool,
+    }
+    impl LevelAccess for Level {
+        fn block_state(&self, p: BlockPos) -> BlockStateId {
+            self.blocks.get(&p).copied().unwrap_or(self.air)
+        }
+        fn set_raw(&mut self, p: BlockPos, s: BlockStateId) -> Option<BlockStateId> {
+            Some(self.blocks.insert(p, s).unwrap_or(self.air))
+        }
+        fn is_loaded(&self, _: BlockPos) -> bool {
+            true
+        }
+        fn random(&mut self) -> &mut LegacyRandom {
+            &mut self.random
+        }
+        fn game_time(&self) -> i64 {
+            0
+        }
+        fn emit(&mut self, _: LevelEvent) {}
+        fn is_client_side(&self) -> bool {
+            self.client
+        }
+        fn before_state_for_placement(
+            &self,
+            _: BlockStateId,
+            c: &PlacementContext,
+            _: horizon_world::fluid::FluidState,
+            _: &mut Option<Option<BlockStateId>>,
+        ) {
+            self.asked.borrow_mut().push(c.item.clone());
+        }
+    }
+    for client in [false, true] {
+        let mut level = Level {
+            air: facts.air,
+            blocks: HashMap::new(),
+            random: LegacyRandom::new(1),
+            asked: RefCell::default(),
+            client,
+        };
+        for (i, name) in ["ruby:empty", "ruby:filled"].iter().enumerate() {
+            assert_eq!(items.get(name).unwrap().block, Some(target));
+            assert_eq!(b.item_binding(name).unwrap().block, b.block(target));
+            let pos = BlockPos::new(i as i32 * 2, 70, 0);
+            let ctx = PlaceContext {
+                clicked_pos: pos,
+                face: Direction::Up,
+                hit: Vec3::new(f64::from(pos.x) + 0.5, 70.0, 0.5),
+                inside: false,
+                yaw: 0.0,
+                pitch: 0.0,
+                sneaking: false,
+                item: (*name).into(),
+                can_use_game_master_blocks: false,
+            };
+            assert!(
+                matches!(b.place_block(&mut level,&mut Ticks::default(),&ctx),PlaceOutcome::Placed{state,..} if state==target)
+            );
+            assert_eq!(level.asked.borrow().last().map(String::as_str), Some(*name));
+        }
+    }
+    fs::remove_dir_all(scratch).unwrap();
+}
+
+#[test]
+fn place_block_compiles_ordinary_bindings_without_changing_components() {
+    use horizon_mods::content::Item;
+    let (base, mut mods) = block_base(
+        "place-block-bindings",
+        &[r#"{"template":"minecraft:test","item":false}"#],
+    );
+    let item = |id: &str, target: Option<&str>| Item {
+        id: id.into(),
+        template: "minecraft:test".into(),
+        place_block: target.map(str::to_owned),
+        ..Default::default()
+    };
+    mods[0]
+        .content
+        .declare(
+            &[],
+            &[
+                item("testmod:empty", Some("testmod:test")),
+                item("testmod:filled", Some("testmod:test")),
+                item("testmod:vanilla", Some("minecraft:test")),
+                item("testmod:plain", None),
+            ],
+        )
+        .unwrap();
+    let plan = Plan::new(&base, &mods).unwrap();
+    let mut behaviours:J=serde_json::from_str(r#"{"states":[{},{}],"blocks":[],"items":{"minecraft:test":{"class":["Item"],"fields":{}}}}"#).unwrap();
+    plan.json("block-behaviours.json", &mut behaviours).unwrap();
+    let behaviours = serde_json::to_value(behaviours).unwrap();
+    for name in ["empty", "filled", "vanilla"] {
+        let binding = &behaviours["items"][format!("testmod:{name}")];
+        assert_eq!(binding["class"], serde_json::json!(["BlockItem", "Item"]));
+        assert_eq!(
+            binding["fields"]["block"],
+            if name == "vanilla" {
+                "minecraft:test"
+            } else {
+                "testmod:test"
+            }
+        );
+    }
+    assert_eq!(
+        behaviours["items"]["testmod:plain"]["class"],
+        serde_json::json!(["Item"])
+    );
+    let mut components:J=serde_json::from_str(r#"{"minecraft:test":{"minecraft:max_stack_size":16,"minecraft:item_model":"minecraft:test"}}"#).unwrap();
+    plan.json("items.json", &mut components).unwrap();
+    let components = serde_json::to_value(components).unwrap();
+    assert_eq!(components["testmod:empty"]["minecraft:max_stack_size"], 16);
+    assert_eq!(
+        components["testmod:empty"]["minecraft:item_model"],
+        "testmod:empty"
+    );
+    drop(plan);
+    for target in ["testmod:missing", "testmod:plain", "minecraft:missing"] {
+        mods[0].content.items[0].place_block = Some(target.into());
+        assert!(
+            Plan::new(&base, &mods)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("not a block")
+        );
+    }
+    fs::remove_dir_all(base.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn renames_ids_keys_and_states() {
     let mut r = Rename::new("minecraft:iron_block", "ruby:ruby_block");
     r.states = 10..12;
@@ -190,6 +383,24 @@ fn tags_merge_without_repeats() {
         merged["values"],
         serde_json::json!(["minecraft:stone", "ruby:ruby_block"])
     );
+}
+
+#[test]
+fn a_mods_atlas_sources_follow_vanillas() {
+    let vanilla = r#"{"sources": [{"type": "directory", "source": "block", "prefix": "block/"}]}"#;
+    let more = [J::Obj(vec![
+        ("type".into(), J::Str("directory".into())),
+        ("source".into(), J::Str("mek_chemical".into())),
+    ])];
+    let merged: serde_json::Value =
+        serde_json::from_str(&merge_atlas(Some(vanilla), &more, "a").unwrap()).unwrap();
+    let sources: Vec<_> = merged["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(sources, ["block", "mek_chemical"]);
 }
 
 /// Registry IDs and state IDs must not depend on package discovery order.
@@ -390,7 +601,7 @@ fn ruby_mod(dir: &Path) -> ContentMod {
             "data/ruby/horizon/block/ruby_block.json",
             r##"{"template": "minecraft:iron_block", "properties": {"hardness": 4.0, "light": 3,
                 "sounds": "minecraft:amethyst_block", "map_color": 28, "friction": 0.8,
-                "random_ticks": true},
+                "random_ticks": true, "occludes": false},
                 "components": {"minecraft:max_stack_size": 16,
                     "minecraft:damage_resistant": {"types": "#minecraft:is_fire"}}}"##,
         ),
@@ -400,7 +611,8 @@ fn ruby_mod(dir: &Path) -> ContentMod {
         ),
         (
             "data/ruby/horizon/block/ruby_glass.json",
-            r#"{"template": "minecraft:glass", "item": false}"#,
+            r#"{"template": "minecraft:glass", "item": false,
+                "properties": {"render_shape": "ENTITYBLOCK_ANIMATED"}}"#,
         ),
         (
             "data/ruby/horizon/item/ruby.json",
@@ -540,6 +752,30 @@ fn content_root_loads_with_every_table() {
     assert!(independent_behaviours.random_tick_candidate(ruby));
     assert!(!independent_behaviours.is_randomly_ticking(iron));
     assert!(deferred_behaviours.is_randomly_ticking(ruby));
+    // `occludes: false` (noOcclusion): the iron-template block occludes nothing, iron still does.
+    assert!(!facts.get(ruby).can_occlude && !facts.get(ruby).solid_render);
+    // Its light dampening is a non-solid full block's, as leaves' and spawners' are (iron's is 15).
+    assert_eq!(
+        (facts.get(ruby).dampening, facts.get(iron).dampening),
+        (1, 15)
+    );
+    assert!(facts.get(iron).can_occlude && facts.get(iron).solid_render);
+    let definitions: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("render-definitions.json")).unwrap()).unwrap();
+    assert_eq!(
+        definitions["ruby:ruby_block"]["can_occlude"], false,
+        "faces beside it are drawn"
+    );
+    assert_eq!(definitions["minecraft:iron_block"]["can_occlude"], true);
+    // `render_shape` leaves the glass's model out of the chunk mesh; the block keeps the template's.
+    assert_eq!(
+        facts.get(BlockStateId(n + 65)).render_shape,
+        crate::blocks::RenderShape::Animated
+    );
+    assert_eq!(
+        facts.get(ruby).render_shape,
+        crate::blocks::RenderShape::Model
+    );
     for state in [ruby, ruby_door, BlockStateId(n + 65)] {
         assert_eq!(shared_facts.get(state).hardness, facts.get(state).hardness);
         assert_eq!(
@@ -948,12 +1184,19 @@ fn content_root_is_reused_until_a_mod_changes() {
     let file = fs::File::options().write(true).open(&lang).unwrap();
     file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
         .unwrap();
-    resource_root(&base, std::slice::from_ref(&m), &cache).unwrap();
-    assert!(!sentinel.exists(), "a changed mod kept the old root");
+    let rebuilt = resource_root(&base, std::slice::from_ref(&m), &cache).unwrap();
+    assert_ne!(rebuilt, root, "a changed mod reused the old root");
+    assert!(
+        fs::read_to_string(rebuilt.join("assets/ruby/lang/en_us.json"))
+            .unwrap()
+            .contains("Ruby Block")
+    );
+    // The root a running game was given is never changed under it.
+    assert!(sentinel.exists(), "a changed mod rebuilt the root in place");
     assert!(
         fs::read_to_string(root.join("assets/ruby/lang/en_us.json"))
             .unwrap()
-            .contains("Ruby Block")
+            .contains("Block of Ruby")
     );
     let _ = fs::remove_dir_all(&scratch);
 }
@@ -1144,6 +1387,8 @@ fn a_superflat_world_runs_its_structure_sets_on_flat_ground() {
             "minecraft:strongholds".into(),
             "minecraft:villages".into(),
         ]),
+        features: false,
+        lakes: false,
     };
     let terrain = crate::vanillagen::VanillaTerrain::for_flat(
         &base.join("worldgen"),
@@ -1189,6 +1434,70 @@ fn a_superflat_world_runs_its_structure_sets_on_flat_ground() {
     );
 }
 
+/// `adjustGenerationSettings`: the Overworld preset decorates its plains with grass,
+/// flowers and trees even with no structure set (`structure_overrides: []`, or
+/// `generate_structures` off), and without `features` the same layers stay bare.
+#[test]
+#[ignore = "full content root: CI and pr_ready run it"]
+fn a_decorated_superflat_world_without_structures_grows_its_features() {
+    use crate::streaming::ChunkGenerator;
+    let Some(base) = prepared() else {
+        return;
+    };
+    let assets = Assets::load(&base).unwrap();
+    let biomes = crate::biome::Biomes::load(&base).unwrap();
+    // Blocks above the grass (the top layer is at the level's minimum Y + 63) in the
+    // chunk at 4, 4 once its 3×3 region is decorated.
+    let above_ground = |features| {
+        let flat = horizon_world::worldgen::generator::FlatSettings {
+            layers: vec![
+                ("minecraft:bedrock".into(), 1),
+                ("minecraft:stone".into(), 59),
+                ("minecraft:dirt".into(), 3),
+                ("minecraft:grass_block".into(), 1),
+            ],
+            biome: "minecraft:plains".into(),
+            structure_overrides: Some(vec![]),
+            features,
+            lakes: false,
+        };
+        let terrain = crate::vanillagen::VanillaTerrain::for_flat(
+            &base.join("worldgen"),
+            &Default::default(),
+            assets.registry,
+            &biomes,
+            1234,
+            &flat,
+            false,
+        )
+        .unwrap();
+        let mut worker = terrain.worker();
+        let mut region: [_; 9] =
+            std::array::from_fn(|i| terrain.proto(&mut worker, 3 + i as i32 % 3, 3 + i as i32 / 3));
+        terrain.decorate(&mut worker, &mut region);
+        let [_, _, _, _, center, ..] = region;
+        let chunk = terrain.finish(center);
+        let mut found = Vec::new();
+        for y in 0..16 {
+            for z in 64..80 {
+                for x in 64..80 {
+                    let name = &assets.registry.state(chunk.block(x, y, z)).unwrap().name;
+                    if name != "minecraft:air" {
+                        found.push(name.clone());
+                    }
+                }
+            }
+        }
+        found
+    };
+    let decorated = above_ground(true);
+    assert!(
+        decorated.iter().any(|n| n == "minecraft:short_grass"),
+        "{decorated:?}"
+    );
+    assert_eq!(above_ground(false), Vec::<String>::new());
+}
+
 /// `createForFlat` searches the stronghold rings with seed 0, so a superflat world's
 /// strongholds are in the same place on every seed; a layer that is not opaque to
 /// `MOTION_BLOCKING` is `null`, left out of `buildTerrain` for the fill after the structures.
@@ -1209,6 +1518,8 @@ fn a_superflat_world_keeps_its_strongholds_on_every_seed_and_leaves_null_layers_
         ],
         biome: "minecraft:plains".into(),
         structure_overrides: Some(vec!["minecraft:strongholds".into()]),
+        features: false,
+        lakes: false,
     };
     let make = |seed| {
         crate::vanillagen::VanillaTerrain::for_flat(
@@ -1281,6 +1592,8 @@ fn a_superflat_structure_override_naming_no_set_lets_every_set_generate() {
         ],
         biome: "minecraft:plains".into(),
         structure_overrides: Some(vec!["minecraft:village".into()]),
+        features: false,
+        lakes: false,
     };
     let terrain = crate::vanillagen::VanillaTerrain::for_flat(
         &base.join("worldgen"),
@@ -1379,6 +1692,38 @@ fn content_root_with_only_an_item_checks_its_identity() {
     fs::remove_dir_all(&scratch).unwrap();
 }
 
+/// a living mod type's row in `entity-types.json` is its template's with
+/// `template` added and its own attribute bases; every other value keeps the
+/// template's text, to the digit. An attribute the template lacks is refused.
+#[test]
+fn a_living_mod_types_row_is_its_templates_with_its_attributes() {
+    let zombie = r#"{"width":0.6,"height":1.95,"eye_height":1.74,"category":"monster",
+        "fire_immune":false,"attributes":{"minecraft:max_health":20.0,
+        "minecraft:movement_speed":0.23000000417232513,"minecraft:armor":2.0}}"#;
+    let row = serde_json::value::RawValue::from_string(zombie.to_owned()).unwrap();
+    let ghoul = |attributes: &[(&str, f64)]| EntityType {
+        id: "ruby:ghoul".into(),
+        template: "minecraft:zombie".into(),
+        item: None,
+        damage: 0.0,
+        attributes: attributes
+            .iter()
+            .map(|(a, v)| (a.to_string(), *v))
+            .collect(),
+    };
+    let written = mod_entity_row(&row, &ghoul(&[("minecraft:max_health", 40.0)])).unwrap();
+    let written: serde_json::Value = serde_json::from_slice(&written).unwrap();
+    let mut expected: serde_json::Value = serde_json::from_str(zombie).unwrap();
+    expected["attributes"]["minecraft:max_health"] = 40.0.into();
+    expected["template"] = "minecraft:zombie".into();
+    assert_eq!(written, expected);
+    // the untouched speed keeps the template's text, not a reparsed float.
+    let text = String::from_utf8(mod_entity_row(&row, &ghoul(&[])).unwrap()).unwrap();
+    assert!(text.contains("0.23000000417232513"), "{text}");
+    let e = mod_entity_row(&row, &ghoul(&[("minecraft:flying_speed", 1.0)])).unwrap_err();
+    assert!(e.contains("not one of minecraft:zombie's"), "{e}");
+}
+
 /// a mod's thrown entity type gets the network id after vanilla's last, the
 /// commands accept it, and it changes the content identity.
 #[test]
@@ -1428,7 +1773,10 @@ fn content_root_registers_a_mod_entity_type() {
     let types: serde_json::Value =
         serde_json::from_slice(&fs::read(root.join("entity-types.json")).unwrap()).unwrap();
     assert!(types["minecraft:snowball"].is_object());
-    assert_eq!(types["example:bolt"], types["minecraft:snowball"]);
+    let mut bolt = types["example:bolt"].clone();
+    assert_eq!(bolt["template"], "minecraft:snowball");
+    bolt.as_object_mut().unwrap().remove("template");
+    assert_eq!(bolt, types["minecraft:snowball"]);
     // the rewritten table keeps vanilla's floats to the bit (a zombie's speed).
     let speed = |root: &Path| {
         let attributes =
@@ -1537,6 +1885,38 @@ fn listed_namespaces_join_the_root() {
     let tags: BTreeMap<String, String> =
         serde_json::from_slice(&fs::read(root.join("worldgen/biome_tags.json")).unwrap()).unwrap();
     assert!(tags.contains_key("kaisyn:has_tower"));
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+/// A mod's `assets/minecraft/atlases/blocks.json` adds its sources after vanilla's.
+#[test]
+fn a_content_root_appends_a_mods_atlas_sources() {
+    let Some(base) = prepared() else {
+        return;
+    };
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-atlas-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let m = folder_mod(
+        &scratch.join("gauge"),
+        &[
+            ("horizon-mod.toml", &manifest("gauge", "")),
+            (
+                "assets/minecraft/atlases/blocks.json",
+                r#"{"sources": [{"type": "minecraft:directory", "source": "gauge_liquid", "prefix": "gauge_liquid/"}]}"#,
+            ),
+        ],
+    );
+    let root = scratch.join("root");
+    build(&base, &[m], &root).unwrap();
+    let sources = |dir: &Path| -> Vec<serde_json::Value> {
+        let text = fs::read(dir.join("assets/minecraft/atlases/blocks.json")).unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&text).unwrap();
+        doc["sources"].as_array().unwrap().clone()
+    };
+    let (vanilla, built) = (sources(&base), sources(&root));
+    assert_eq!(built.len(), vanilla.len() + 1);
+    assert_eq!(built[..vanilla.len()], vanilla[..]);
+    assert_eq!(built[vanilla.len()]["source"], "gauge_liquid");
     let _ = fs::remove_dir_all(&scratch);
 }
 
@@ -2543,6 +2923,112 @@ fn block_base_of(tag: &str, declarations: &[&str], facts: &str) -> (PathBuf, Vec
     (base, mods)
 }
 
+#[test]
+fn tuple_shapes_follow_final_state_order_and_separate_collision() {
+    let declaration = r#"{"template":"minecraft:test","item":false,
+      "state_properties":{"active":{"type":"boolean"}},
+      "shapes":{"properties":["axis","active"],
+        "values":{"x,true":[[0,0,0,0.5,1,1]]},"default":[[0,0,0,1,1,1]]},
+      "collision_shapes":{"properties":["active","axis"],
+        "values":{"true,x":[[0,0,0,0.25,1,1]]},"default":[]}}"#;
+    let (base, mods) = block_base("tuple-shapes", &[declaration]);
+    let plan = Plan::new(&base, &mods).unwrap();
+    let block = &plan.blocks[0];
+    let shapes = block.shapes.as_ref().unwrap();
+    let collisions = block.collision_shapes.as_ref().unwrap();
+    assert_eq!(shapes.len(), 4);
+    assert_eq!(collisions.len(), 4);
+    for (index, (template, combo)) in block.state_combinations().enumerate() {
+        let special = template == 0
+            && combo
+                .iter()
+                .any(|(name, value)| name == "active" && value == "true");
+        assert_eq!(
+            shapes[index].bounds().unwrap().max(Axis::X),
+            if special { 0.5 } else { 1.0 }
+        );
+        assert_eq!(collisions[index].is_empty(), !special);
+        if special {
+            assert_eq!(collisions[index].bounds().unwrap().max(Axis::X), 0.25);
+        }
+    }
+    let mut gameplay: J =
+        serde_json::from_slice(&fs::read(base.join("gameplay-facts.json")).unwrap()).unwrap();
+    plan.json("gameplay-facts.json", &mut gameplay).unwrap();
+    let Some(J::Arr(rows)) = gameplay.get("states") else {
+        panic!("states")
+    };
+    for (index, row) in rows[2..].iter().enumerate() {
+        assert_eq!(row.get("full_collision"), Some(&J::Bool(false)));
+        let Some(J::Arr(outline)) = row.get("outline") else {
+            panic!("outline")
+        };
+        assert_eq!(outline.len(), shapes[index].boxes().len());
+    }
+    let mut tag = Tag::Compound(Compound::from([
+        (
+            JavaString::from("states"),
+            Tag::List(vec![test_state_row("x"), test_state_row("y")]),
+        ),
+        (JavaString::from("shapes"), Tag::List(Vec::new())),
+        (
+            JavaString::from("cached_shapes"),
+            Tag::IntArray(vec![-1, -1]),
+        ),
+    ]));
+    plan.nbt(&mut tag);
+    plan.collision_shapes(&mut tag).unwrap();
+    let Some(Tag::List(entries)) = tag.get("shapes") else {
+        panic!("shapes")
+    };
+    let Some(Tag::IntArray(mapping)) = tag.get("cached_shapes") else {
+        panic!("mapping")
+    };
+    for (index, shape) in collisions.iter().enumerate() {
+        assert_eq!(entries[mapping[2 + index] as usize], encode_shape(shape));
+    }
+    fs::remove_dir_all(base.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn collision_only_preserves_outline_and_shape_typos_are_errors() {
+    let declaration = r#"{"template":"minecraft:test","collision_shapes":{"default":[]}}"#;
+    let (base, mods) = block_base("collision-only", &[declaration]);
+    let plan = Plan::new(&base, &mods).unwrap();
+    assert!(plan.blocks[0].shapes.is_none());
+    assert!(
+        plan.blocks[0]
+            .collision_shapes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(VoxelShape::is_empty)
+    );
+    let mut gameplay: J =
+        serde_json::from_str(r#"{"states":[{"outline":[[0,0,0,1,1,1]]},{"outline":[]}]}"#).unwrap();
+    plan.json("gameplay-facts.json", &mut gameplay).unwrap();
+    let Some(J::Arr(rows)) = gameplay.get("states") else {
+        panic!("states")
+    };
+    assert_eq!(rows[0].get("outline"), rows[2].get("outline"));
+    assert_eq!(rows[1].get("outline"), rows[3].get("outline"));
+    assert_eq!(rows[2].get("full_collision"), Some(&J::Bool(false)));
+    fs::remove_dir_all(base.parent().unwrap()).unwrap();
+    for (index, table) in [
+        r#"{"properties":["axis","typo"],"default":[]}"#,
+        r#"{"properties":["axis"],"values":{"bad":[]},"default":[]}"#,
+        r#"{"properties":["axis"],"values":{"x":[]}}"#,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let declaration = format!(r#"{{"template":"minecraft:test","collision_shapes":{table}}}"#);
+        let (base, mods) = block_base(&format!("collision-typo-{index}"), &[&declaration]);
+        assert!(Plan::new(&base, &mods).is_err(), "{table}");
+        fs::remove_dir_all(base.parent().unwrap()).unwrap();
+    }
+}
+
 /// A block's states are its template's times the combinations of the state
 /// properties it declares, in a fixed order with every default first.
 #[test]
@@ -3059,7 +3545,8 @@ fn a_shape_and_the_state_count_cover_every_combination() {
 }
 
 /// A base root of one block with three biomes, two biome tags (one nesting
-/// the other) and three vanilla placed features: what biome modifiers read.
+/// the other), three vanilla placed features and entity types: what biome
+/// modifiers read.
 fn biome_base(tag: &str) -> PathBuf {
     let (base, _) = block_base(tag, &[]);
     let worldgen = base.join("worldgen");
@@ -3074,7 +3561,7 @@ fn biome_base(tag: &str) -> PathBuf {
             bundle(&[
                 (
                     "minecraft:plains",
-                    r#"{"temperature":0.8,"features":[[],["minecraft:lake"],[],[],[],[],["minecraft:ore_coal"]]}"#,
+                    r#"{"temperature":0.8,"features":[[],["minecraft:lake"],[],[],[],[],["minecraft:ore_coal"]],"attributes":{"minecraft:gameplay/natural_mob_spawns":{"argument":{"spawn_costs":{"minecraft:skeleton":{"energy_budget":0.7,"charge":0.15}},"spawns_by_category":{"monster":[{"type":"minecraft:zombie","count":4,"weight":95},{"type":"minecraft:skeleton","count":4,"weight":100}]}},"modifier":"overlay"}}}"#,
                 ),
                 ("minecraft:desert", r#"{"features":[["minecraft:fossil"]]}"#),
                 (
@@ -3109,6 +3596,18 @@ fn biome_base(tag: &str) -> PathBuf {
     for (name, text) in files {
         fs::write(worldgen.join(name), text).unwrap();
     }
+    fs::write(
+        base.join("entity-types.json"),
+        r#"{"minecraft:zombie":{"category":"monster"},"minecraft:skeleton":{"category":"monster"},"minecraft:stray":{"category":"monster"},"minecraft:rabbit":{"category":"creature"}}"#,
+    )
+    .unwrap();
+    let entity_tags = base.join("data/minecraft/tags/entity_type");
+    fs::create_dir_all(&entity_tags).unwrap();
+    fs::write(
+        entity_tags.join("skeletons.json"),
+        r#"{"values":["minecraft:skeleton","minecraft:stray",{"id":"othermod:bone","required":false}]}"#,
+    )
+    .unwrap();
     base
 }
 
@@ -3263,14 +3762,14 @@ fn biome_modifiers_none_keep_the_vanilla_biomes() {
     let _ = fs::remove_dir_all(&scratch);
 }
 
-/// An unknown biome, biome tag, feature, step or modifier type fails the
-/// build with the mod and file named.
+/// An unknown biome, biome tag, feature, entity type, step or modifier type is
+/// skipped with a warning or fails the build with the mod and file named.
 #[test]
 fn biome_modifiers_refuse_unknown_names() {
     let base = biome_base("biome-modifiers-errors");
     let scratch = base.parent().unwrap().to_owned();
     // A name the root doesn't have, or a type not read yet: that modifier is
-    // skipped with a warning (another mod's ids, `#c:` tags and `add_spawns`
+    // skipped with a warning (another mod's ids, `#c:` tags and `add_carvers`
     // are common in real mods), and the mods still load.
     for (i, (modifier, warning)) in [
         (
@@ -3289,8 +3788,18 @@ fn biome_modifiers_refuse_unknown_names() {
             "unknown placed feature zinc:ore_tin",
         ),
         (
-            r#"{"type":"neoforge:add_spawns","biomes":"minecraft:plains","spawners":[]}"#,
-            "biome modifier type \"add_spawns\" skipped",
+            r#"{"type":"neoforge:add_spawns","biomes":"minecraft:plains",
+                "spawners":{"type":"zinc:goblin","weight":10,"minCount":1,"maxCount":2}}"#,
+            "unknown entity type zinc:goblin",
+        ),
+        (
+            r##"{"type":"neoforge:remove_spawns","biomes":"minecraft:plains",
+                "entity_types":"#minecraft:is_goblin"}"##,
+            "unknown entity type tag #minecraft:is_goblin",
+        ),
+        (
+            r#"{"type":"neoforge:add_carvers","biomes":"minecraft:plains","carvers":[]}"#,
+            "biome modifier type \"add_carvers\" skipped",
         ),
     ]
     .into_iter()
@@ -3305,21 +3814,147 @@ fn biome_modifiers_refuse_unknown_names() {
         );
     }
     // A malformed modifier of a type Horizon reads is the mod's error.
-    let m = zinc_mod(
-        &scratch.join("zinc-step"),
-        &[(
-            "bad",
+    for (i, (modifier, err)) in [
+        (
             r#"{"type":"neoforge:add_features","biomes":"minecraft:plains",
                 "features":"zinc:ore_zinc","step":"ores"}"#,
-        )],
+            "unknown generation step \"ores\"",
+        ),
+        (
+            r#"{"type":"neoforge:add_spawns","biomes":"minecraft:plains",
+                "spawners":{"type":"minecraft:zombie","weight":10,"minCount":5,"maxCount":2}}"#,
+            "minCount (5) > maxCount (2)",
+        ),
+        (
+            r#"{"type":"neoforge:add_spawn_costs","biomes":"minecraft:plains",
+                "entity_types":"minecraft:zombie","spawn_cost":{"energy_budget":0.7}}"#,
+            "spawn_cost: no charge",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let m = zinc_mod(&scratch.join(format!("zinc-err{i}")), &[("bad", modifier)]);
+        let e = build(&base, &[m], &scratch.join(format!("out-err{i}")))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(err), "{e}");
+        assert!(
+            e.contains("mod zinc: data/zinc/neoforge/biome_modifier/bad.json"),
+            "{e}"
+        );
+    }
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+/// `add_spawns`, `remove_spawns`, `add_spawn_costs` and `remove_spawn_costs`
+/// rewrite `minecraft:gameplay/natural_mob_spawns` in the biomes they name:
+/// additions before removals regardless of file order, spawners placed under
+/// their entity type's category with `minCount`/`maxCount` converted to
+/// `count`, and untouched biomes left byte for byte as they were.
+#[test]
+fn biome_modifiers_change_mob_spawns_and_spawn_costs() {
+    let base = biome_base("biome-modifiers-spawns");
+    let scratch = base.parent().unwrap().to_owned();
+    let m = zinc_mod(
+        &scratch.join("zinc"),
+        &[
+            // Listed before `add_spawns`, but removals run after additions:
+            // takes out vanilla's `minecraft:skeleton` and the added
+            // `minecraft:stray` via `#minecraft:skeletons`.
+            (
+                "a_no_skeletons",
+                r##"{"type":"neoforge:remove_spawns","biomes":"#minecraft:is_overworld",
+                    "entity_types":"#minecraft:skeletons"}"##,
+            ),
+            (
+                "a_no_skeleton_cost",
+                r##"{"type":"neoforge:remove_spawn_costs","biomes":"minecraft:plains",
+                    "entity_types":"#minecraft:skeletons"}"##,
+            ),
+            // Single spawner object (`minCount == maxCount` -> integer `count`)
+            // on a biome that had no `attributes` at all (`desert`), and on `plains`.
+            (
+                "add_rabbits",
+                r##"{"type":"neoforge:add_spawns","biomes":"#minecraft:is_overworld",
+                    "spawners":{"type":"minecraft:rabbit","weight":12,"minCount":3,"maxCount":3}}"##,
+            ),
+            // Array of spawners (`minCount < maxCount` -> `minecraft:uniform`).
+            (
+                "add_monsters",
+                r#"{"type":"forge:add_spawns","biomes":"plains",
+                    "spawners":[
+                        {"type":"stray","weight":80,"minCount":1,"maxCount":4},
+                        {"type":"minecraft:zombie","weight":20,"minCount":2,"maxCount":5}
+                    ]}"#,
+            ),
+            (
+                "add_zombie_cost",
+                r#"{"type":"neoforge:add_spawn_costs","biomes":["minecraft:plains","minecraft:desert"],
+                    "entity_types":["minecraft:zombie","minecraft:stray"],
+                    "spawn_cost":{"energy_budget":0.85,"charge":0.2}}"#,
+            ),
+        ],
     );
-    let e = build(&base, &[m], &scratch.join("out-step"))
-        .unwrap_err()
-        .to_string();
-    assert!(e.contains("unknown generation step \"ores\""), "{e}");
-    assert!(
-        e.contains("mod zinc: data/zinc/neoforge/biome_modifier/bad.json"),
-        "{e}"
+    let out = scratch.join("out");
+    let warnings = build(&base, &[m], &out).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    let text = |root: &Path| -> BTreeMap<String, String> {
+        serde_json::from_slice(&fs::read(root.join("worldgen/biomes.json")).unwrap()).unwrap()
+    };
+    let out_biomes = text(&out);
+    // Untouched biome keeps its exact bytes.
+    assert_eq!(
+        out_biomes["minecraft:nether_wastes"],
+        text(&base)["minecraft:nether_wastes"]
+    );
+
+    let plains: serde_json::Value = serde_json::from_str(&out_biomes["minecraft:plains"]).unwrap();
+    let plains_spawns = &plains["attributes"]["minecraft:gameplay/natural_mob_spawns"]["argument"];
+    // `minecraft:skeleton` and the added `minecraft:stray` were removed by
+    // `remove_spawns`, while vanilla's zombie, the second zombie spawner, and
+    // the rabbit in `creature` remain.
+    assert_eq!(
+        plains_spawns["spawns_by_category"],
+        serde_json::json!({
+            "monster": [
+                {"type": "minecraft:zombie", "count": 4, "weight": 95},
+                {
+                    "type": "minecraft:zombie",
+                    "count": {"type": "minecraft:uniform", "min_inclusive": 2, "max_inclusive": 5},
+                    "weight": 20
+                }
+            ],
+            "creature": [
+                {"type": "minecraft:rabbit", "count": 3, "weight": 12}
+            ]
+        })
+    );
+    // `skeleton` and `stray` costs were removed on `plains`; `zombie` cost remains.
+    assert_eq!(
+        plains_spawns["spawn_costs"],
+        serde_json::json!({
+            "minecraft:zombie": {"energy_budget": 0.85, "charge": 0.2}
+        })
+    );
+
+    let desert: serde_json::Value = serde_json::from_str(&out_biomes["minecraft:desert"]).unwrap();
+    let desert_spawns = &desert["attributes"]["minecraft:gameplay/natural_mob_spawns"]["argument"];
+    assert_eq!(
+        desert_spawns["spawns_by_category"],
+        serde_json::json!({
+            "creature": [
+                {"type": "minecraft:rabbit", "count": 3, "weight": 12}
+            ]
+        })
+    );
+    assert_eq!(
+        desert_spawns["spawn_costs"],
+        serde_json::json!({
+            "minecraft:zombie": {"energy_budget": 0.85, "charge": 0.2},
+            "minecraft:stray": {"energy_budget": 0.85, "charge": 0.2}
+        })
     );
     let _ = fs::remove_dir_all(&scratch);
 }
@@ -3535,10 +4170,14 @@ fn blocks_and_items_declared_in_code_get_ids() {
         resource_root(&base, &mods, &scratch.join("cache")).unwrap(),
         root
     );
+    // Changed declarations build a root of their own: the old one stays as
+    // it was, for a switch back to that set.
     let stamp = fs::read(root.join(STAMP)).unwrap();
     mods[1].content.items[0].max_stack_size = Some(2);
-    resource_root(&base, &mods, &scratch.join("cache")).unwrap();
-    assert_ne!(fs::read(root.join(STAMP)).unwrap(), stamp);
+    let changed = resource_root(&base, &mods, &scratch.join("cache")).unwrap();
+    assert_ne!(changed, root);
+    assert_ne!(fs::read(changed.join(STAMP)).unwrap(), stamp);
+    assert_eq!(fs::read(root.join(STAMP)).unwrap(), stamp);
     let _ = fs::remove_dir_all(&scratch);
 }
 
@@ -3938,4 +4577,211 @@ fn a_symlink_file_is_copied_through() {
     assert!(!fs::symlink_metadata(&at).unwrap().file_type().is_symlink());
     assert_eq!(fs::read(&at).unwrap(), b"real");
     let _ = fs::remove_dir_all(&scratch);
+}
+
+/// A content mod of recipes, a tag and a name, for vanilla's items: what
+/// switches live (docs/design/mod-hotload.md).
+fn glint_mod(dir: &Path) -> ContentMod {
+    folder_mod(
+        dir,
+        &[
+            ("horizon-mod.toml", &manifest("glint", "")),
+            (
+                "data/glint/recipe/diamond_from_dirt.json",
+                r#"{"type": "minecraft:crafting_shapeless", "category": "misc",
+                    "ingredients": ["minecraft:dirt", "minecraft:dirt"],
+                    "result": {"id": "minecraft:diamond"}}"#,
+            ),
+            (
+                "data/c/tags/item/gems/glint.json",
+                r#"{"values": ["minecraft:diamond"]}"#,
+            ),
+            (
+                "assets/glint/lang/en_us.json",
+                r#"{"glint.hello": "Hello"}"#,
+            ),
+        ],
+    )
+}
+
+#[test]
+fn only_assets_and_data_switch_live() {
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-live-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    assert_eq!(
+        live_switch(&glint_mod(&scratch.join("glint")).content),
+        Ok(())
+    );
+    let ruby = ruby_mod(&scratch.join("ruby"));
+    assert_eq!(
+        live_switch(&ruby.content),
+        Err("horizon.mods.switch.registries")
+    );
+    let effect = folder_mod(
+        &scratch.join("fx"),
+        &[
+            ("horizon-mod.toml", &manifest("fx", "")),
+            (
+                "data/fx/horizon/mob_effect/glow.json",
+                r#"{"category": "harmful", "color": 1}"#,
+            ),
+        ],
+    );
+    assert_eq!(
+        live_switch(&effect.content),
+        Err("horizon.mods.switch.registries")
+    );
+    for (id, file, text) in [
+        (
+            "ores",
+            "data/ores/neoforge/biome_modifier/add.json",
+            r#"{"type": "neoforge:none"}"#,
+        ),
+        (
+            "village",
+            "data/minecraft/tags/worldgen/biome/has_structure/village_plains.json",
+            r#"{"values": []}"#,
+        ),
+        (
+            "feat",
+            "data/feat/worldgen/placed_feature/rock.json",
+            r#"{"feature": "minecraft:ore_iron", "placement": []}"#,
+        ),
+    ] {
+        let m = folder_mod(
+            &scratch.join(id),
+            &[("horizon-mod.toml", &manifest(id, "")), (file, text)],
+        );
+        assert_eq!(
+            live_switch(&m.content),
+            Err("horizon.mods.switch.worldgen"),
+            "{file}"
+        );
+    }
+    fs::remove_dir_all(&scratch).unwrap();
+}
+
+/// On, off and on again: each root has what its set of mods has, a switch
+/// never changes a root a game was given, and a set seen before reuses its
+/// root without building it again.
+#[test]
+#[ignore = "full content root: CI and pr_ready run it"]
+fn a_data_mod_loads_unloads_and_loads_again() {
+    let Some(base) = prepared() else {
+        return;
+    };
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-reload-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let cache = scratch.join("cache");
+    let glint = glint_mod(&scratch.join("glint"));
+    let dirt = || Some(crate::items::ItemStack::new("minecraft:dirt", 1));
+    let grid = [dirt(), dirt(), None, None];
+    // What a world reads from a root: the item tags and the recipes.
+    let tables = |root: &Path| {
+        let assets = Assets::load(root).unwrap();
+        let facts = BlockFacts::load(root, assets.registry).unwrap();
+        let items = Items::load(root, assets.registry, &facts, &PackOverlay::NONE).unwrap();
+        let recipes = crate::crafting::Recipes::load(root, &items, &PackOverlay::NONE).unwrap();
+        let crafted = recipes.find(&grid, 2).map(|(_, out)| out.item.to_string());
+        let tagged = items.item_tag_order.get("c:gems/glint").cloned();
+        (
+            crafted,
+            tagged,
+            root.join("assets/glint/lang/en_us.json").is_file(),
+        )
+    };
+    let loaded = (
+        Some("minecraft:diamond".to_owned()),
+        Some(vec!["minecraft:diamond".to_owned()]),
+        true,
+    );
+
+    let started = std::time::Instant::now();
+    let on = resource_root(&base, std::slice::from_ref(&glint), &cache).unwrap();
+    eprintln!("content root built in {} ms", started.elapsed().as_millis());
+    assert_ne!(on, base);
+    assert_eq!(tables(&on), loaded);
+
+    // Off: the base root, without any of it.
+    let off = resource_root(&base, &[], &cache).unwrap();
+    assert_eq!(off, base);
+    assert_eq!(tables(&off), (None, None, false));
+    assert!(on.join("assets/glint/lang/en_us.json").is_file());
+
+    // On again: the same root, not built again.
+    let sentinel = on.join("sentinel");
+    fs::write(&sentinel, b"").unwrap();
+    let started = std::time::Instant::now();
+    let again = resource_root(&base, std::slice::from_ref(&glint), &cache).unwrap();
+    eprintln!(
+        "content root reused in {} ms",
+        started.elapsed().as_millis()
+    );
+    assert_eq!(again, on);
+    assert!(sentinel.exists());
+    assert_eq!(tables(&again), loaded);
+
+    // Another set of mods builds its own root beside it and leaves this one as it was.
+    let ruby = ruby_mod(&scratch.join("ruby"));
+    let package = horizon_mods::Package::read(&scratch.join("glint")).unwrap();
+    let glint_again = ContentMod {
+        id: "glint".into(),
+        content: Content::read(&scratch.join("glint"), &package.manifest).unwrap(),
+    };
+    let both = resource_root(&base, &[glint_again, ruby], &cache).unwrap();
+    assert_ne!(both, on);
+    assert!(sentinel.exists());
+    assert_eq!(tables(&both).0, loaded.0);
+    fs::remove_dir_all(&scratch).unwrap();
+}
+
+#[test]
+fn roots_unused_for_a_day_are_removed() {
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-prune-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let roots = scratch.join("mod-content");
+    let root = |name: &str, age_s: u64| {
+        let dir = roots.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        let stamp = dir.join(STAMP);
+        fs::write(&stamp, b"x").unwrap();
+        let file = fs::File::options().write(true).open(&stamp).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(age_s))
+            .unwrap();
+        dir
+    };
+    let current = root("00000000000000aa", 3 * 86400);
+    let recent = root("00000000000000bb", 60);
+    let stale = root("00000000000000cc", 2 * 86400);
+    // Not a root's name: never touched while the folder has no root of the old layout.
+    let other = roots.join("notes");
+    fs::create_dir_all(&other).unwrap();
+    prune_roots(&roots, &current, KEEP_ROOTS);
+    assert!(current.exists() && recent.exists() && other.exists());
+    assert!(!stale.exists());
+    // An older game's single root, built straight in the folder, goes.
+    fs::write(roots.join(STAMP), b"old").unwrap();
+    fs::create_dir_all(roots.join("assets/minecraft")).unwrap();
+    prune_roots(&roots, &current, KEEP_ROOTS);
+    assert!(!roots.join(STAMP).exists() && !roots.join("assets").exists());
+    assert!(current.exists() && recent.exists());
+    fs::remove_dir_all(&scratch).unwrap();
+}
+
+/// A mod's features reach the features bundle from 26.3's `feature/` folder
+/// and from the older `configured_feature/` one.
+#[test]
+fn worldgen_entry_reads_both_feature_folders() {
+    for folder in ["feature", "configured_feature"] {
+        let file = format!("data/zinc/worldgen/{folder}/ore_zinc.json");
+        assert_eq!(
+            worldgen_entry(&file),
+            Some(("worldgen/features.json", "zinc:ore_zinc".to_owned())),
+            "{folder}"
+        );
+    }
+    assert_eq!(
+        worldgen_entry("data/zinc/worldgen/nope/ore_zinc.json"),
+        None
+    );
 }

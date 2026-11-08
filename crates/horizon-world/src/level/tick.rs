@@ -13,6 +13,7 @@ use horizon_core::{
     random::RandomSource,
     ticks::TickTypeId,
 };
+use std::rc::Rc;
 use std::sync::Arc;
 
 impl<L: LevelAccess + ?Sized> Sim<'_, L> {
@@ -78,26 +79,25 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                     }
                 }
                 Class::Coral => {
-                    if !self.coral_scan_for_water(pos) {
-                        if let Some(dead) = b.data(state).link {
-                            let next = b.default_of(dead);
-                            if self.level.allow_block_fade(pos, state, next) {
-                                self.set_block(pos, next, 2);
-                            }
+                    if !self.coral_scan_for_water(pos)
+                        && let Some(dead) = b.data(state).link
+                    {
+                        let next = b.default_of(dead);
+                        if self.level.allow_block_fade(pos, state, next) {
+                            self.set_block(pos, next, 2);
                         }
                     }
                 }
                 Class::CoralFan | Class::CoralPlant | Class::CoralWallFan => {
-                    if !self.coral_plant_scan_for_water(state, pos) {
-                        if let Some(dead) = b.data(state).link {
-                            let mut next =
-                                b.table.set_bool(b.default_of(dead), p.waterlogged, false);
-                            if class == Class::CoralWallFan {
-                                next = b.table.set_dir(next, p.facing, b.facing(state));
-                            }
-                            if self.level.allow_block_fade(pos, state, next) {
-                                self.set_block(pos, next, 2);
-                            }
+                    if !self.coral_plant_scan_for_water(state, pos)
+                        && let Some(dead) = b.data(state).link
+                    {
+                        let mut next = b.table.set_bool(b.default_of(dead), p.waterlogged, false);
+                        if class == Class::CoralWallFan {
+                            next = b.table.set_dir(next, p.facing, b.facing(state));
+                        }
+                        if self.level.allow_block_fade(pos, state, next) {
+                            self.set_block(pos, next, 2);
                         }
                     }
                 }
@@ -110,6 +110,44 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                         if previous != count && b.data(state).is(Class::TrappedChest) {
                             self.trapped_chest_update_neighbors(pos, state);
                         }
+                        if count > 0 {
+                            self.schedule_tick(pos, block, 5);
+                        }
+                    }
+                }
+                Class::Barrel => {
+                    // BarrelBlock.tick → BarrelBlockEntity.recheckOpen →
+                    // ContainerOpenersCounter.recheckOpeners: the barrel
+                    // recounts its openers, and the count crossing zero opens
+                    // or closes it. Unlike a chest it broadcasts no block
+                    // event (BarrelBlockEntity$1.openerCountChanged is empty):
+                    // the `open` property, the barrel's own sound and the
+                    // container game events are its whole report.
+                    if let Some((previous, count)) = self.level.recheck_container_openers(pos) {
+                        if previous != count {
+                            let open = count > 0;
+                            let sound: Arc<str> = if open {
+                                "minecraft:block.barrel.open".into()
+                            } else {
+                                "minecraft:block.barrel.close".into()
+                            };
+                            // BarrelBlockEntity.playSound: volume 0.5, pitch
+                            // 0.9 to 1.0 from the level random.
+                            let pitch = 0.9 + self.random().next_float() * 0.1;
+                            self.sound(pos, &sound, 0.5, pitch);
+                            // BarrelBlockEntity.updateBlockState.
+                            self.set_block_and_update(pos, b.table.set_bool(state, p.open, open));
+                            self.game_event(
+                                pos,
+                                if open {
+                                    "minecraft:container_open"
+                                } else {
+                                    "minecraft:container_close"
+                                },
+                            );
+                        }
+                        // ContainerOpenersCounter.scheduleRecheck holds only
+                        // while someone has it open.
                         if count > 0 {
                             self.schedule_tick(pos, block, 5);
                         }
@@ -313,7 +351,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                     if rules.spawn_mobs
                         && rules.spawn_monsters
                         && difficulty != 0
-                        && self.level.dimension() == super::Dimension::Overworld
+                        && self.level.dimension_type().nether_portal_spawns_piglin
                         && self.rand_int(2000) < difficulty
                     {
                         self.emit(LevelEvent::BlockEvent {
@@ -444,7 +482,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         if data.implements(super::classes::Interface::WeatheringCopper) {
             let upper_door = data.is(Class::Door) && b.table.text(state, p.half) == "upper";
             let right_chest = data.is(Class::Chest) && b.table.text(state, p.kind) == "right";
-            if !upper_door && !right_chest {
+            // WeatheringCopperChestBlock.randomTick: a chest someone has open
+            // does not weather, and draws nothing (#11378).
+            let viewed_chest = data.is(Class::Chest) && self.level.container_open(pos);
+            if !upper_door && !right_chest && !viewed_chest {
                 self.copper_change_over_time(state, pos);
             }
         }
@@ -583,10 +624,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             self.remove_block(pos, false);
         }
         let below_state = self.below_state(pos);
-        let infiniburn = match self.level.dimension() {
-            super::Dimension::Overworld => &b.tags.infiniburn_overworld,
-            super::Dimension::Nether => &b.tags.infiniburn_nether,
-            super::Dimension::End => &b.tags.infiniburn_end,
+        let infiniburn = match self.level.dimension_type().infiniburn.as_str() {
+            "#minecraft:infiniburn_nether" => &b.tags.infiniburn_nether,
+            "#minecraft:infiniburn_end" => &b.tags.infiniburn_end,
+            _ => &b.tags.infiniburn_overworld,
         };
         let infini = b.in_set(below_state, infiniburn);
         let age = b.table.int(state, p.age);
@@ -725,7 +766,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             true
         };
         if self.rand_int(3) == 0 || fewer(self, pos, 4) {
-            let brightness = if self.level.dimension() == super::Dimension::End {
+            let brightness = if self.level.level_key() == super::LevelKey::END {
                 self.level.block_light(pos)
             } else {
                 self.max_local_raw_brightness(pos)
@@ -847,15 +888,14 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 .support_tag2
                 .as_ref()
                 .is_some_and(|tag| b.in_set(below_state, tag))
+            && let (Some(fruit), Some(stem)) = (data.link, data.link2)
         {
-            if let (Some(fruit), Some(stem)) = (data.link, data.link2) {
-                self.set_block_and_update(relative, b.default_of(fruit));
-                self.set_block_and_update(
-                    pos,
-                    b.table
-                        .set_dir(b.default_of(stem), b.props.facing, direction),
-                );
-            }
+            self.set_block_and_update(relative, b.default_of(fruit));
+            self.set_block_and_update(
+                pos,
+                b.table
+                    .set_dir(b.default_of(stem), b.props.facing, direction),
+            );
         }
     }
     /// `PitcherCropBlock.grow`.
@@ -1466,12 +1506,19 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 if layers < max_height.min(8) {
                     let to = b.table.set_int(state, p.layers, layers + 1);
                     if self.level.allow_block_form(top, state, to) {
+                        self.emit(LevelEvent::BlockEvent {
+                            pos: top,
+                            state,
+                            kind: "push_entities_up",
+                        });
                         self.set_block_and_update(top, to);
                     }
                 }
             } else {
                 let to = b.default_of(b.named.snow);
                 if self.level.allow_block_form(top, state, to) {
+                    // Vanilla creates the first snow layer without `pushEntitiesUp`
+                    // (only an added layer over existing snow lifts).
                     self.set_block_and_update(top, to);
                 }
             }
@@ -1561,10 +1608,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         }
         let chance = (older + 1) as f32 / (older + same + 1) as f32;
         let modifier = if own == 0 { 0.75 } else { 1.0 };
-        if self.random().next_float() < chance * chance * modifier {
-            if let Some(next) = self.copper_next(state) {
-                self.set_block_and_update(pos, next);
-            }
+        if self.random().next_float() < chance * chance * modifier
+            && let Some(next) = self.copper_next(state)
+        {
+            self.set_block_and_update(pos, next);
         }
     }
     /// `WeatheringCopper.getNext` by registry naming.
@@ -1826,7 +1873,7 @@ impl Behaviours {
         level: &mut L,
         ticks: &mut Ticks,
         chunk: ChunkPos,
-        mut next_ticking: impl FnMut(&mut L, i32) -> Option<(i32, Option<Arc<RandomTickMask>>)>,
+        mut next_ticking: impl FnMut(&mut L, i32) -> Option<(i32, Option<Rc<RandomTickMask>>)>,
     ) {
         let speed = level.game_rules().random_tick_speed;
         if speed <= 0 {
@@ -1933,6 +1980,7 @@ impl RandomTickMask {
         }
         Self(bits)
     }
+    #[inline]
     pub fn may_tick(&self, pos: BlockPos) -> bool {
         let i = ((pos.y & 15) << 8 | (pos.z & 15) << 4 | (pos.x & 15)) as usize;
         self.0[i >> 6] >> (i & 63) & 1 != 0

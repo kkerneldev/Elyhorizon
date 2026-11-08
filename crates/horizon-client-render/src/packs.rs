@@ -170,8 +170,17 @@ fn last_pre_minor(current: Format) -> i64 {
 /// `PackFormat.fullCodec(default_minor)`: an int, or a list of 1 to 256
 /// non-negative ints whose second is the minor. None: it does not parse.
 fn format_codec(v: &serde_json::Value, default_minor: i64) -> Option<Format> {
-    let non_negative =
-        |v: &serde_json::Value| v.as_i64().filter(|n| *n >= 0 && *n <= i64::from(i32::MAX));
+    // `Codec.INT` reads any JSON number through `Number.intValue`: a decimal such as `97.1`
+    // counts as its whole part (97), as it does for the game.
+    let non_negative = |v: &serde_json::Value| {
+        v.as_i64()
+            .or_else(|| {
+                v.as_f64()
+                    .filter(|f| f.is_finite())
+                    .map(|f| f.trunc() as i64)
+            })
+            .filter(|n| *n >= 0 && *n <= i64::from(i32::MAX))
+    };
     match v {
         serde_json::Value::Array(a) if (1..=256).contains(&a.len()) => {
             let list: Option<Vec<i64>> = a.iter().map(non_negative).collect();
@@ -453,7 +462,7 @@ fn read_meta(source: &Source) -> Option<serde_json::Value> {
 /// The first JSON value of a `pack.mcmeta`: what follows it is ignored, as some packs sign the
 /// file with a comment after the closing brace. Gson reads past a UTF-8 byte order mark;
 /// serde_json rejects it.
-fn parse_meta(bytes: &[u8]) -> Option<serde_json::Value> {
+pub(crate) fn parse_meta(bytes: &[u8]) -> Option<serde_json::Value> {
     serde_json::Deserializer::from_slice(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes))
         .into_iter()
         .next()?
@@ -636,7 +645,7 @@ fn build_overlay_uncached(
     }
     // FallbackResourceManager: a file's `.mcmeta` counts only from the pack that
     // supplies the file or one above it; vanilla's own sits below every pack.
-    let hidden: BTreeSet<String> = files
+    let mut hidden: BTreeSet<String> = files
         .iter()
         .filter(|(name, _)| !name.ends_with(".mcmeta"))
         .filter_map(|(name, (owner, _))| {
@@ -647,6 +656,25 @@ fn build_overlay_uncached(
             }
         })
         .collect();
+    // A companion from below the winning colour would describe another surface.
+    // A map-only pack above it is intentional and remains valid.
+    for (name, (owner, _)) in &files {
+        let Some(stem) = name.strip_suffix(".png") else {
+            continue;
+        };
+        if stem.ends_with("_n") || stem.ends_with("_s") {
+            continue;
+        }
+        for suffix in ["_n.png", "_s.png"] {
+            let map = format!("{stem}{suffix}");
+            if files
+                .get(&map)
+                .is_none_or(|(map_owner, _)| map_owner < owner)
+            {
+                hidden.insert(map);
+            }
+        }
+    }
     for name in &hidden {
         files.remove(name);
     }
@@ -809,24 +837,55 @@ fn build_overlay_uncached(
         dependencies,
         &mut extract,
     )?;
+    // What the zips may unpack to, all threads together: a server's pack is a download the
+    // player only accepts, and a gigabyte of zeros deflates to a megabyte, so without it a pack
+    // at the download limit wrote hundreds of gigabytes here. Vanilla never unpacks a pack.
+    let budget = std::sync::atomic::AtomicU64::new(unpack_budget(packs));
     // Inflating and writing a big pack's files one by one was most of a cold build; its
     // folders all exist by now.
-    crate::par::par_map(&extract, |(owner, inner, target)| {
+    let extracted: io::Result<()> = crate::par::par_map(&extract, |(owner, inner, target)| {
         let Some(Some(z)) = zips.get(*owner) else {
             return Ok(());
         };
-        // One unreadable entry costs that file, not the pack: an error here
-        // failed the build and the reload dropped every server pack in the stack.
-        match z.read(inner) {
-            Ok(bytes) => fs::write(target, bytes),
+        let copied = fs::File::create(target).and_then(|file| {
+            let mut file = io::BufWriter::new(file);
+            z.copy_to(inner, &mut file, &budget)?;
+            io::Write::flush(&mut file)
+        });
+        match copied {
+            Ok(()) => Ok(()),
+            // Past the budget the build fails, and the reload drops the server packs.
+            Err(e) if e.kind() == io::ErrorKind::FileTooLarge => Err(e),
+            // One unreadable entry costs that file, not the pack: an error here
+            // failed the build and the reload dropped every server pack in the stack.
             Err(e) => {
                 log::warn!("Horizon: skipping unreadable pack entry {inner}: {e}");
+                let _ = fs::remove_file(target);
                 Ok(())
             }
         }
     })
     .into_iter()
-    .collect()
+    .collect();
+    if extracted.is_err() {
+        // What was unpacked before the budget ran out goes too, not only the marker.
+        let _ = fs::remove_dir_all(out);
+    }
+    extracted
+}
+/// The most the zip packs in `packs` may unpack to in one overlay: 16 times their size on disk
+/// (real packs are mostly PNGs and JSON, a few times smaller zipped at most), at least 64 MiB
+/// for a small pack of text, and never past 8 GiB.
+fn unpack_budget(packs: &[Pack]) -> u64 {
+    packs
+        .iter()
+        .filter_map(|p| match &p.source {
+            Source::Zip(z) => fs::metadata(z).ok().map(|m| m.len()),
+            Source::Dir(_) => None,
+        })
+        .sum::<u64>()
+        .saturating_mul(16)
+        .clamp(64 << 20, 8 << 30)
 }
 /// Files vanilla loads from every pack in turn (`getResourceStack`) rather
 /// than from the top pack only.
@@ -871,9 +930,24 @@ fn merge(kind: Merge, layers: &[Vec<u8>]) -> Option<Vec<u8>> {
         .iter()
         // SoundManager skips a sounds.json Gson rejects, whole.
         .filter(|b| kind != Merge::Sounds || crate::sound_events::is_valid_file(b))
-        .filter_map(|b| match serde_json::from_slice(b) {
-            Ok(Value::Object(m)) => Some(m),
-            _ => None,
+        .filter_map(|b| {
+            match serde_json::from_slice(b) {
+                Ok(Value::Object(m)) => Some(m),
+                // `Language.loadFromJson` reads with Gson's lenient reader, so
+                // a lang file with `#` comments still counts; a file that
+                // strict JSON accepts keeps its bytes as they are.
+                _ if kind == Merge::Lang => {
+                    let mut strings = std::collections::HashMap::new();
+                    horizon_client_core::lang::read_lang_file(b, &mut strings);
+                    Some(
+                        strings
+                            .into_iter()
+                            .map(|(k, v)| (k, Value::String(v)))
+                            .collect(),
+                    )
+                }
+                _ => None,
+            }
         })
         .collect();
     let list = |key: &str, layers: &mut dyn Iterator<Item = &Map<String, Value>>| {
@@ -957,7 +1031,10 @@ pub fn resource_root(vanilla: &Path, packs: &[Pack], cache: &Path) -> io::Result
         (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
     });
     let out = cache.join(format!("{hash:016x}"));
+    cache::hold(&out)?;
     build_overlay(vanilla, packs, &out)?;
+    // Old selections' overlays would otherwise stay for good, each a whole unpacked copy.
+    cache::prune(cache);
     Ok(out)
 }
 
@@ -1257,6 +1334,16 @@ mod tests {
                 .unwrap_err()
                 .contains("deprecated")
         );
+        // A decimal reads as its whole part, in a list or alone: `[97.1]` is format 97 (a pack
+        // that meant `[97, 1]` still loads and counts as compatible).
+        assert_eq!(
+            check(r#"{"min_format":[97.1],"max_format":[97.1]}"#),
+            Ok(((97, 0), (97, i64::from(i32::MAX))))
+        );
+        assert_eq!(
+            check(r#"{"min_format":97.9,"max_format":98.5}"#),
+            Ok(((97, 0), (98, i64::from(i32::MAX))))
+        );
         assert_eq!(
             check(r#"{"min_format":97,"max_format":98}"#),
             Ok(((97, 0), (98, i64::from(i32::MAX))))
@@ -1386,6 +1473,18 @@ mod tests {
             parse(lang.unwrap()),
             serde_json::json!({"a":"vanilla a","b":"pack b"})
         );
+        // A layer with `#` comments is read leniently, not dropped.
+        let lenient = merge(
+            Merge::Lang,
+            &[
+                json(r#"{"a":"vanilla a"}"#),
+                json("# a pack comment\n{\"b\":\"pack b\", # trailing\n\"a\":\"pack a\"}"),
+            ],
+        );
+        assert_eq!(
+            parse(lenient.unwrap()),
+            serde_json::json!({"a":"pack a","b":"pack b"})
+        );
         // SoundManager: sounds add up; `replace` starts the event over.
         let sounds = merge(
             Merge::Sounds,
@@ -1467,6 +1566,61 @@ mod tests {
             Some(Merge::Atlas)
         );
         assert_eq!(merge_kind("assets/minecraft/models/block/stone.json"), None);
+    }
+    #[test]
+    fn companion_maps_follow_the_winning_colour_or_a_higher_map_only_pack() {
+        let root =
+            std::env::temp_dir().join(format!("horizon-material-owner-{}", std::process::id()));
+        let vanilla = root.join("vanilla");
+        let relative = "assets/minecraft/textures/block";
+        fs::create_dir_all(vanilla.join(relative)).unwrap();
+        let names = ["stone.png", "stone_n.png", "stone_s.png"];
+        for name in names {
+            fs::write(vanilla.join(relative).join(name), b"base").unwrap();
+        }
+        for (pack, files) in [
+            ("low", vec!["stone_n.png", "stone_s.png"]),
+            ("colour", vec!["stone.png"]),
+            ("maps", vec!["stone_n.png"]),
+        ] {
+            let dir = root.join("packs").join(pack);
+            fs::create_dir_all(dir.join(relative)).unwrap();
+            fs::write(
+                dir.join("pack.mcmeta"),
+                br#"{"pack":{"description":"fixture","pack_format":97}}"#,
+            )
+            .unwrap();
+            for name in files {
+                fs::write(dir.join(relative).join(name), pack.as_bytes()).unwrap();
+            }
+        }
+        let all = discover(&vanilla, &root.join("packs"));
+        let order = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| {
+                    all.iter()
+                        .find(|p| p.id == format!("file/{name}"))
+                        .unwrap()
+                        .clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        let out = root.join("out");
+        build_overlay(&vanilla, &order(&["low", "colour"]), &out).unwrap();
+        assert_eq!(
+            fs::read(out.join(relative).join("stone.png")).unwrap(),
+            b"colour"
+        );
+        assert!(!out.join(relative).join("stone_n.png").exists());
+        assert!(!out.join(relative).join("stone_s.png").exists());
+        build_overlay(&vanilla, &order(&["low", "colour", "maps"]), &out).unwrap();
+        assert_eq!(
+            fs::read(out.join(relative).join("stone_n.png")).unwrap(),
+            b"maps"
+        );
+        assert!(!out.join(relative).join("stone_s.png").exists());
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn overlay_layers_packs_over_vanilla() {
@@ -1614,6 +1768,77 @@ mod tests {
         walk(&out.join("assets"), &out, &mut built);
         assert_eq!(built, expected);
         let _ = fs::remove_dir_all(base);
+    }
+    #[test]
+    fn a_pack_that_unpacks_past_its_budget_fails_and_leaves_nothing() {
+        use std::io::Write as _;
+        let base = std::env::temp_dir().join(format!("horizon-pack-bomb-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let vanilla = base.join("vanilla");
+        fs::create_dir_all(vanilla.join("assets/minecraft/textures/block")).unwrap();
+        fs::write(
+            vanilla.join("assets/minecraft/textures/block/stone.png"),
+            b"vanilla",
+        )
+        .unwrap();
+        fs::create_dir_all(base.join("packs")).unwrap();
+        let pack = |name: &str, files: &[(&str, usize)]| {
+            let path = base.join("packs").join(name);
+            let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+            let deflated = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("pack.mcmeta", deflated).unwrap();
+            zip.write_all(br#"{"pack":{"description":"d","pack_format":97}}"#)
+                .unwrap();
+            let zeros = vec![0u8; 1 << 20];
+            for (file, mib) in files {
+                zip.start_file(*file, deflated).unwrap();
+                for _ in 0..*mib {
+                    zip.write_all(&zeros).unwrap();
+                }
+            }
+            zip.finish().unwrap();
+            fs::metadata(&path).unwrap().len()
+        };
+        // Four 24 MiB files of zeros: well under the per-file limit, 96 MiB in all from a zip of
+        // a few hundred KiB, past the 64 MiB a small pack may unpack to.
+        let size = pack(
+            "bomb.zip",
+            &[
+                ("assets/minecraft/textures/block/a.png", 24),
+                ("assets/minecraft/textures/block/b.png", 24),
+                ("assets/minecraft/textures/block/c.png", 24),
+                ("assets/minecraft/textures/block/d.png", 24),
+            ],
+        );
+        assert!(size < 1 << 20, "the bomb is small: {size} bytes");
+        let packs = discover(&vanilla, &base.join("packs"));
+        assert_eq!(packs.len(), 1);
+        let out = base.join("overlay");
+        let error = build_overlay(&vanilla, &packs, &out).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge, "{error}");
+        assert!(
+            !out.exists(),
+            "what was unpacked before the budget ran out stays"
+        );
+        // The same files within the budget unpack whole.
+        fs::remove_file(base.join("packs/bomb.zip")).unwrap();
+        pack(
+            "fine.zip",
+            &[
+                ("assets/minecraft/textures/block/a.png", 24),
+                ("assets/minecraft/textures/block/b.png", 24),
+            ],
+        );
+        let packs = discover(&vanilla, &base.join("packs"));
+        build_overlay(&vanilla, &packs, &out).unwrap();
+        assert_eq!(
+            fs::metadata(out.join("assets/minecraft/textures/block/b.png"))
+                .unwrap()
+                .len(),
+            24 << 20
+        );
+        let _ = fs::remove_dir_all(&base);
     }
     #[test]
     fn zip_entries_never_leave_the_overlay() {

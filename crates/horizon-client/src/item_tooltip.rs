@@ -2,8 +2,9 @@
 //! and lines without player context for the recipe book's search tree.
 use crate::text::{GRAY, Text};
 use crate::{
+    bundle::TooltipLayout,
     hud::rgba,
-    items::{ItemInfo, ItemStack},
+    items::{ItemInfo, ItemStack, Items},
 };
 use horizon_world::nbt::Tag;
 
@@ -313,6 +314,23 @@ pub fn rarity<'a>(stack: &ItemStack, default: &'a str) -> &'a str {
             r => r,
         }
     }
+}
+
+/// `BundleItem.getTooltipImage`: the contents grid of a bundle, or None when
+/// the stack is not one or `minecraft:tooltip_display` hides
+/// `minecraft:bundle_contents` - the image is that component's tooltip
+/// detail, so a display that hides the component hides the grid too.
+pub fn bundle_tooltip(
+    items: &Items,
+    stack: &ItemStack,
+    x: f32,
+    y: f32,
+    box_width: f32,
+) -> Option<TooltipLayout> {
+    TooltipDisplay::for_stack(stack)
+        .shows("minecraft:bundle_contents")
+        .then(|| crate::bundle::tooltip_layout(items, stack, x, y, box_width))
+        .flatten()
 }
 
 fn is_beehive(path: &str) -> bool {
@@ -653,6 +671,84 @@ pub fn unbreakable_line(
     .then(|| translate("item.unbreakable").unwrap_or_else(|| "item.unbreakable".into()))
 }
 
+/// `ItemStack.addDetailsToTooltip`'s adventure lines, `can_break` then
+/// `can_place_on`: each shown one adds an empty line, its gray header
+/// (`AdventureModePredicate.CAN_BREAK_HEADER` / `CAN_PLACE_HEADER`) and
+/// `AdventureModePredicate.computeTooltip`: `item.canUse.unknown` in gray when
+/// some predicate names no blocks, else every distinct block of the
+/// predicates' holder sets by its name (`Block.getName`) in dark gray.
+/// `tag_blocks` lists the blocks of a block tag.
+pub fn adventure_lines(
+    stack: &ItemStack,
+    display: &TooltipDisplay,
+    tag_blocks: &dyn Fn(&str) -> Vec<String>,
+    translate: &dyn Fn(&str) -> Option<String>,
+) -> Vec<(String, u32)> {
+    let text = |key: &str| translate(key).unwrap_or_else(|| key.to_owned());
+    let namespaced = |id: &str| {
+        if id.contains(':') {
+            id.to_owned()
+        } else {
+            format!("minecraft:{id}")
+        }
+    };
+    let (gray, dark_gray) = (rgba(170, 170, 170, 255), rgba(85, 85, 85, 255));
+    let mut lines = Vec::new();
+    for (component, header) in [
+        ("minecraft:can_break", "item.canBreak"),
+        ("minecraft:can_place_on", "item.canPlace"),
+    ] {
+        let Some(tag) = stack.data().and_then(|d| d.other(component)) else {
+            continue;
+        };
+        if !display.shows(component) {
+            continue;
+        }
+        lines.push((String::new(), u32::MAX));
+        lines.push((text(header), gray));
+        let predicates: Vec<&Tag> = match tag {
+            Tag::List(list) => list.iter().collect(),
+            single => vec![single],
+        };
+        if predicates.iter().any(|p| p.get("blocks").is_none()) {
+            lines.push((text("item.canUse.unknown"), gray));
+            continue;
+        }
+        let mut blocks: Vec<String> = Vec::new();
+        for p in predicates {
+            let ids = match p.get("blocks") {
+                Some(Tag::String(entry)) => {
+                    let entry = entry.to_string_lossy();
+                    match entry.strip_prefix('#') {
+                        Some(tag) => tag_blocks(&namespaced(tag)),
+                        None => vec![namespaced(&entry)],
+                    }
+                }
+                Some(Tag::List(entries)) => entries
+                    .iter()
+                    .filter_map(|e| match e {
+                        Tag::String(id) => Some(namespaced(&id.to_string_lossy())),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            for id in ids {
+                if !blocks.contains(&id) {
+                    blocks.push(id);
+                }
+            }
+        }
+        for id in blocks {
+            lines.push((
+                text(&format!("block.{}", id.replacen(':', ".", 1))),
+                dark_gray,
+            ));
+        }
+    }
+    lines
+}
+
 /// `OminousBottleAmplifier.addToTooltip`: the effect the bottle gives,
 /// `MobEffectInstance(BAD_OMEN, 120000, amplifier)`, listed as
 /// `PotionContents.addPotionTooltip` lists it, in the colour of Bad Omen's
@@ -836,6 +932,19 @@ pub fn smithing_template_lines(
     ]
 }
 
+/// `DiscFragmentItem.appendHoverText`: the gray "Music Disc - 5" line; none for
+/// other items.
+pub fn disc_fragment_line(
+    stack: &ItemStack,
+    translate: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    if &*stack.item != "minecraft:disc_fragment_5" {
+        return None;
+    }
+    let key = "item.minecraft.disc_fragment_5.desc";
+    Some(translate(key).unwrap_or_else(|| key.to_owned()))
+}
+
 /// The lines of `stack` below its name that its components give, in
 /// `ItemStack.addDetailsToTooltip` order.
 pub fn detail_lines(
@@ -851,6 +960,7 @@ pub fn detail_lines(
             .into_iter()
             .map(|l| l.0),
     );
+    lines.extend(disc_fragment_line(stack, translate));
     let display = TooltipDisplay::for_stack(stack);
     lines.extend(bees_line(stack, &display, translate));
     lines.extend(honey_line(stack, &display, translate));
@@ -1022,16 +1132,15 @@ pub fn container_lines(
     let mut lines: Vec<String> = slots
         .iter()
         .take(5)
-        .map(|(_, s)| {
-            count
-                .replacen("%s", &s.count.to_string(), 1)
-                .replacen("%s", &name(s), 1)
-        })
+        .map(|(_, s)| horizon_protocol::text::format_java(&count, &[s.count.to_string(), name(s)]))
         .collect();
     if slots.len() > 5 {
         let more =
             translate("item.container.more_items").unwrap_or_else(|| "and %s more...".into());
-        lines.push(more.replacen("%s", &(slots.len() - 5).to_string(), 1));
+        lines.push(horizon_protocol::text::format_java(
+            &more,
+            &[(slots.len() - 5).to_string()],
+        ));
     }
     lines
 }
@@ -1102,6 +1211,27 @@ mod tests {
     use super::*;
     use horizon_world::loot::PackOverlay;
     use std::sync::Arc;
+
+    #[test]
+    fn disc_fragment_shows_music_disc_line_first() {
+        let translate = |k: &str| {
+            (k == "item.minecraft.disc_fragment_5.desc").then(|| "Music Disc - 5".to_owned())
+        };
+        let stack = ItemStack::new("minecraft:disc_fragment_5", 1);
+        assert_eq!(
+            disc_fragment_line(&stack, &translate).as_deref(),
+            Some("Music Disc - 5")
+        );
+        let lines = detail_lines(&stack, None, &translate);
+        assert_eq!(lines.first().map(String::as_str), Some("Music Disc - 5"));
+        let other = ItemStack::new("minecraft:stick", 1);
+        assert_eq!(disc_fragment_line(&other, &translate), None);
+        assert!(
+            !detail_lines(&other, None, &translate)
+                .iter()
+                .any(|l| l == "Music Disc - 5")
+        );
+    }
 
     #[test]
     fn styled_name_keeps_gradient_spans_and_explicit_italic() {
@@ -1195,6 +1325,45 @@ mod tests {
         assert!(!display.name_visible(false));
         assert!(display.name_visible(true));
         assert!(!display.shows("minecraft:attribute_modifiers"));
+    }
+
+    /// `BundleItem.getTooltipImage` is a tooltip detail of
+    /// `minecraft:bundle_contents`, so a `minecraft:tooltip_display` that
+    /// hides the component - or the whole tooltip - takes the contents grid
+    /// with it. The draw path asks for the grid through the same function.
+    #[test]
+    fn a_bundle_contents_grid_follows_the_tooltip_display() {
+        let items = Items::for_tests(Default::default());
+        let mut bundle = ItemStack::new("minecraft:bundle", 1);
+        bundle.data_mut().bundle_contents = vec![ItemStack::new("minecraft:stone", 3)];
+        assert!(bundle_tooltip(&items, &bundle, 0.0, 0.0, 96.0).is_some());
+        // A stack that is not a bundle has no grid.
+        let stone = ItemStack::new("minecraft:stone", 1);
+        assert!(bundle_tooltip(&items, &stone, 0.0, 0.0, 96.0).is_none());
+        // A display that hides the contents component hides the grid.
+        bundle.data_mut().set_other(
+            "minecraft:tooltip_display",
+            Some(Tag::compound([(
+                "hidden_components",
+                Tag::List(vec![Tag::String("minecraft:bundle_contents".into())]),
+            )])),
+        );
+        assert!(bundle_tooltip(&items, &bundle, 0.0, 0.0, 96.0).is_none());
+        // So does one that hides the whole tooltip.
+        bundle.data_mut().set_other(
+            "minecraft:tooltip_display",
+            Some(Tag::compound([("hide_tooltip", Tag::Byte(1))])),
+        );
+        assert!(bundle_tooltip(&items, &bundle, 0.0, 0.0, 96.0).is_none());
+        // A component the display does not name leaves the grid alone.
+        bundle.data_mut().set_other(
+            "minecraft:tooltip_display",
+            Some(Tag::compound([(
+                "hidden_components",
+                Tag::List(vec![Tag::String("minecraft:lore".into())]),
+            )])),
+        );
+        assert!(bundle_tooltip(&items, &bundle, 0.0, 0.0, 96.0).is_some());
     }
 
     #[test]
@@ -1476,6 +1645,12 @@ mod tests {
             ]
         );
         assert!(container_lines(&ItemStack::new("minecraft:chest", 1), &name, &lang).is_empty());
+        // German writes the count after the name: "%2$s× %1$s".
+        let german = |k: &str| match k {
+            "item.container.item_count" => Some("%2$s× %1$s".to_owned()),
+            other => lang(other),
+        };
+        assert_eq!(container_lines(&chest, &name, &german)[0], "stone× 1");
     }
 
     #[test]

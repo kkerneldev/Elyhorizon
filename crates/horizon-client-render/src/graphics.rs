@@ -128,6 +128,44 @@ impl EntityCullingMode {
     }
 }
 
+/// Particle visibility strategy, independent of Entity Culling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ParticleCullingMode {
+    #[default]
+    Off,
+    Synchronous,
+    Asynchronous,
+}
+impl ParticleCullingMode {
+    pub const ALL: [ParticleCullingMode; 3] = [
+        ParticleCullingMode::Off,
+        ParticleCullingMode::Synchronous,
+        ParticleCullingMode::Asynchronous,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Synchronous => "sync",
+            Self::Asynchronous => "async",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Synchronous => "Synchronous",
+            Self::Asynchronous => "Asynchronous",
+        }
+    }
+    fn parse(s: &str) -> Self {
+        match s {
+            "synchronous" | "sync" => Self::Synchronous,
+            "asynchronous" | "async" => Self::Asynchronous,
+            "off" => Self::Off,
+            _ => Self::default(),
+        }
+    }
+}
+
 /// How the swapchain presents frames.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PresentMode {
@@ -333,6 +371,13 @@ pub enum LeafCullingMode {
     /// Every leaf face, as vanilla's fancy leaves draw them.
     #[default]
     Off,
+    /// Drops a face between two leaves when the leaf it faces has a leaf or
+    /// a full opaque cube behind it too: that face only shows through two
+    /// cutout layers. The faces behind the outer layer stay, so a crown
+    /// looks the same from outside. The faced leaf must be in the section
+    /// (as `Hollow`), so the block behind it is at most a border cell of the
+    /// next section, whose edits remesh this one.
+    Hidden,
     /// Leaves surrounded on all six sides by leaves or full opaque cubes draw
     /// in the opaque layer, so their cutouts no longer show the layers behind.
     Solid,
@@ -344,8 +389,9 @@ pub enum LeafCullingMode {
     Hollow,
 }
 impl LeafCullingMode {
-    pub const ALL: [LeafCullingMode; 4] = [
+    pub const ALL: [LeafCullingMode; 5] = [
         LeafCullingMode::Off,
+        LeafCullingMode::Hidden,
         LeafCullingMode::Solid,
         LeafCullingMode::SolidAggressive,
         LeafCullingMode::Hollow,
@@ -353,6 +399,7 @@ impl LeafCullingMode {
     pub fn name(self) -> &'static str {
         match self {
             LeafCullingMode::Off => "off",
+            LeafCullingMode::Hidden => "hidden",
             LeafCullingMode::Solid => "solid",
             LeafCullingMode::SolidAggressive => "solid_aggressive",
             LeafCullingMode::Hollow => "hollow",
@@ -361,6 +408,7 @@ impl LeafCullingMode {
     pub fn label(self) -> &'static str {
         match self {
             LeafCullingMode::Off => "Off",
+            LeafCullingMode::Hidden => "Hidden Faces",
             LeafCullingMode::Solid => "Solid",
             LeafCullingMode::SolidAggressive => "Solid Aggressive",
             LeafCullingMode::Hollow => "Hollow",
@@ -473,6 +521,126 @@ pub fn translucent_batching_offered() -> bool {
     TRANSLUCENT_BATCHING_OFFERED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+static SMOOTH_GRADIENTS_OFFERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Whether the device can draw, blend and filter the 16-bit frame (`Graphics::hdr_smooth_gradients`):
+/// set when the renderer starts. Where it can't, the settings grey its switch out.
+pub fn offer_smooth_gradients(on: bool) {
+    SMOOTH_GRADIENTS_OFFERED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn smooth_gradients_offered() -> bool {
+    SMOOTH_GRADIENTS_OFFERED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// GPU Culling's setting: off, on where it is offered, or Auto, which has it on only where the
+/// CPU limits the frame and it makes the frame faster (`autotune::GpuCullingAuto`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GpuCullingMode {
+    #[default]
+    Off,
+    On,
+    Auto,
+}
+impl GpuCullingMode {
+    pub const ALL: [GpuCullingMode; 3] = [
+        GpuCullingMode::Off,
+        GpuCullingMode::On,
+        GpuCullingMode::Auto,
+    ];
+    /// The value in `horizon-graphics.txt`: `true` and `false` as the switch wrote them.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Off => "false",
+            Self::On => "true",
+            Self::Auto => "auto",
+        }
+    }
+    /// The word `horizon-ctl gpu-culling` takes.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+            Self::Auto => "auto",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::On => "On",
+            Self::Auto => "Auto",
+        }
+    }
+    fn parse(s: &str, default: Self) -> Self {
+        match s {
+            "true" | "on" => Self::On,
+            "false" | "off" => Self::Off,
+            "auto" => Self::Auto,
+            _ => default,
+        }
+    }
+}
+
+/// Whether GPU Culling (`Graphics::gpu_culling`) can be switched on here, and why not: set when a
+/// renderer starts, and again when its pass can't be set up or its buffers stop fitting in video
+/// memory. Where it isn't offered the settings grey its switch out with the reason, and the saved
+/// value waits for a renderer that offers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuCullingOffer {
+    /// No count draws the GPU wrote, compute shaders or working first instances (OpenGL, Metal,
+    /// Vulkan without `VK_KHR_draw_indirect_count`, Intel Gen11/Gen12's Vulkan driver), vanilla
+    /// frames drawn flat, or a pass the driver couldn't build.
+    Unsupported = 0,
+    /// A software adapter (WARP, lavapipe): the pass would run on the CPU, beside the frame.
+    Software = 1,
+    /// Its buffers stopped fitting in video memory: off until the next renderer.
+    OutOfMemory = 2,
+    /// DX12 with flat page groups, whose count draws leave each draw's base vertex out of
+    /// what the near sections' packed faces are read by (`gpu_culling::loses_base_vertex`).
+    Dx12 = 3,
+    /// The graphics device was lost while its frames were drawn (`lose_gpu_culling`): off
+    /// for the renderers after it, until Horizon restarts.
+    DeviceLost = 5,
+    Offered = 4,
+}
+impl GpuCullingOffer {
+    /// The greyed switch's tooltip; `None` where it is offered.
+    pub fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::Unsupported => Some("Your GPU or graphics API doesn't support it."),
+            Self::Software => Some("Not with software rendering, which runs it on the CPU."),
+            Self::OutOfMemory => Some("Out of video memory: off until the next start."),
+            Self::Dx12 => Some("Not on DirectX 12 yet: try the Vulkan graphics API."),
+            Self::DeviceLost => Some("The graphics device was lost: off until the next start."),
+            Self::Offered => None,
+        }
+    }
+}
+static GPU_CULLING_OFFER: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(GpuCullingOffer::Unsupported as u8);
+pub fn offer_gpu_culling(offer: GpuCullingOffer) {
+    GPU_CULLING_OFFER.store(offer as u8, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn gpu_culling_offer() -> GpuCullingOffer {
+    match GPU_CULLING_OFFER.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => GpuCullingOffer::Software,
+        2 => GpuCullingOffer::OutOfMemory,
+        3 => GpuCullingOffer::Dx12,
+        4 => GpuCullingOffer::Offered,
+        5 => GpuCullingOffer::DeviceLost,
+        _ => GpuCullingOffer::Unsupported,
+    }
+}
+/// Set once the graphics device was lost while GPU culling drew the frames (the game's
+/// `recover_device`): the renderers made after it don't offer it (`GpuCullingOffer::DeviceLost`),
+/// so a fault in its frames can't lose the device again after every recovery.
+static GPU_CULLING_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn lose_gpu_culling() {
+    GPU_CULLING_LOST.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn gpu_culling_lost() -> bool {
+    GPU_CULLING_LOST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The farthest LOD Distance, in chunks, on integrated GPUs other than
 /// Apple's: they share the CPU's memory bandwidth, and past it far terrain
 /// costs them more frame time than it is worth.
@@ -549,12 +717,24 @@ pub struct Graphics {
     pub blue_map: crate::bluemap::Settings,
     /// Skip sections hidden behind closed ones (vanilla's occlusion graph).
     pub cave_culling: bool,
+    /// Near solid terrain culled, and its draws listed, on the GPU (`gfx::gpu_culling`), where it
+    /// is offered (`gpu_culling_offer`). Off by default (GPU Culling, Performance graphics); it
+    /// applies at once, and no preset sets it. Every save writes it, so a default turned on later
+    /// needs a new key, as `batchTranslucent` did. Auto turns it on only where the CPU limits the
+    /// frame and it makes the frame faster (`autotune`).
+    pub gpu_culling: GpuCullingMode,
     /// Skip drawing entities hidden behind opaque terrain, synchronously or asynchronously.
     pub entity_culling: EntityCullingMode,
+    /// Minimum entity population for coarse AABB culling; zero disables it.
+    pub entity_culling_precheck: u32,
+    /// Skip particles outside the view or hidden behind opaque terrain.
+    pub particle_culling: ParticleCullingMode,
     /// Terrain leaf faces inside a canopy (see [`LeafCullingMode`]); `Off` draws
     /// vanilla's fancy leaves. Ignored with a resource pack that may replace
     /// the vanilla leaf models ([`Graphics::leaf_culling_effective`]).
     pub leaf_culling: LeafCullingMode,
+    /// Draw regular ice opaque in the solid pass, without its see-through texture.
+    pub opaque_ice: bool,
     /// Cache settled shulker-box models.
     pub cache_shulker_boxes: bool,
     /// Cache sign-text geometry.
@@ -596,6 +776,8 @@ pub struct Graphics {
     pub taa: bool,
     /// TAA upscaling; anything but `Native` comes with `taa` on.
     pub upscaling: Upscaling,
+    /// How much the upscaled picture is sharpened, 0..=100 (percent of the most).
+    pub upscaling_sharpness: u32,
     /// F2 screenshots at this many times the game's resolution: 1, 2, 4 or 8.
     pub screenshot_quality: u32,
     /// Frame generation (Horizon setting), off by default.
@@ -615,6 +797,9 @@ pub struct Graphics {
     /// HDR brightness of the HUD and menus, in percent of paper white (25..=100); the
     /// first-person hand stays at the world's.
     pub hdr_ui_brightness: u32,
+    /// HDR Lighting: Horizon's own HDR look, light sources, the sun and sunlight above paper
+    /// white. Off, HDR output shows the same picture as SDR, for shader packs or the vanilla look.
+    pub hdr_lighting: bool,
     /// A vanilla key name (`HDR_KEY`): opens HDR's settings from the game. Unbound by default.
     pub hdr_key: String,
     /// Battery mode: at most 60 frames per second in a world and 30 in menus
@@ -634,7 +819,12 @@ pub struct Graphics {
     /// `batchTranslucent`: `translucentBatching`, which every save wrote as false while it was
     /// off by default and had no switch, stays ignored.
     pub translucent_batching: bool,
-    /// The shader pack picked in `shaderpacks/` (`shader_pack_list`); empty: none. Its key is
+    /// Smooth Gradients (HDR page, on by default): with HDR output on, the frame is drawn in
+    /// 16 bits, so dark gradients don't band (`Renderer::frame_format`). Read when a renderer
+    /// is made (start, resource-pack reload), like `translucent_batching`, where it is offered
+    /// (`smooth_gradients_offered`).
+    pub hdr_smooth_gradients: bool,
+    /// The native `horizon:<manifest-id>` or classic filename picked in `shaderpacks/`; empty: none. Its key is
     /// not `shaderPack`, which versions before the clean-room rewrite saved and which stays
     /// ignored.
     pub shader_pack: String,
@@ -647,8 +837,12 @@ impl Default for Graphics {
             far_detail: FarDetail::Full,
             blue_map: crate::bluemap::Settings::default(),
             cave_culling: true,
+            gpu_culling: GpuCullingMode::Off,
             entity_culling: EntityCullingMode::Off,
+            entity_culling_precheck: 64,
+            particle_culling: ParticleCullingMode::Off,
             leaf_culling: LeafCullingMode::Off,
+            opaque_ice: false,
             cache_shulker_boxes: false,
             // Sign text has used its renderer cache independently of the new model caches.
             cache_signs: true,
@@ -673,6 +867,7 @@ impl Default for Graphics {
             fxaa: false,
             taa: false,
             upscaling: Upscaling::Native,
+            upscaling_sharpness: 85,
             screenshot_quality: 1,
             frame_generation: FrameGeneration::Off,
             hdr: false,
@@ -680,11 +875,13 @@ impl Default for Graphics {
             hdr_peak: 0,
             hdr_black_level: 0,
             hdr_ui_brightness: 100,
+            hdr_lighting: true,
             hdr_key: "key.keyboard.unknown".into(),
             battery: false,
             shadow_cache: false,
             api: GraphicsApi::Auto,
             translucent_batching: true,
+            hdr_smooth_gradients: true,
             shader_pack: String::new(),
         }
     }
@@ -740,8 +937,14 @@ impl Graphics {
                 }
                 "blueMapAutoDetect" => g.blue_map.auto_detect = flag(g.blue_map.auto_detect),
                 "caveCulling" => g.cave_culling = flag(g.cave_culling),
+                "gpuCulling" => g.gpu_culling = GpuCullingMode::parse(value, g.gpu_culling),
                 "entityCulling" => g.entity_culling = EntityCullingMode::parse(value),
+                "entityCullingPrecheck" => {
+                    g.entity_culling_precheck = number(g.entity_culling_precheck).min(512)
+                }
+                "particleCulling" => g.particle_culling = ParticleCullingMode::parse(value),
                 "leafCulling" => g.leaf_culling = LeafCullingMode::parse(value),
+                "opaqueIce" => g.opaque_ice = flag(g.opaque_ice),
                 "blockEntityCache" => {
                     let enabled = flag(false);
                     g.cache_shulker_boxes = enabled;
@@ -788,6 +991,9 @@ impl Graphics {
                 "fxaa" => g.fxaa = flag(g.fxaa),
                 "taa" => g.taa = flag(g.taa),
                 "upscaling" => g.upscaling = Upscaling::parse(value),
+                "upscalingSharpness" => {
+                    g.upscaling_sharpness = number(g.upscaling_sharpness).min(100)
+                }
                 "screenshotQuality" => {
                     g.screenshot_quality = Some(number(0))
                         .filter(|q| SCREENSHOT_QUALITIES.contains(q))
@@ -795,6 +1001,7 @@ impl Graphics {
                 }
                 "frameGeneration" => g.frame_generation = FrameGeneration::parse(value),
                 "hdr" => g.hdr = flag(g.hdr),
+                "hdrLighting" => g.hdr_lighting = flag(g.hdr_lighting),
                 "hdrPaperWhite" => {
                     g.hdr_paper_white = match number(g.hdr_paper_white) {
                         0 => 0,
@@ -815,6 +1022,7 @@ impl Graphics {
                 "batteryMode" => g.battery = flag(g.battery),
                 "shadowCache" => g.shadow_cache = flag(g.shadow_cache),
                 "batchTranslucent" => g.translucent_batching = flag(g.translucent_batching),
+                "hdrSmoothGradients" => g.hdr_smooth_gradients = flag(g.hdr_smooth_gradients),
                 "graphicsApi" => g.api = GraphicsApi::from_name(value).unwrap_or_default(),
                 "pickedShaderPack" => g.shader_pack = value.to_owned(),
                 "overlay" => {
@@ -831,13 +1039,16 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nleafCulling:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nopaqueIce:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrLighting:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\nhdrSmoothGradients:{}\ngpuCulling:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
             bool_text(self.cave_culling),
             self.entity_culling.name(),
+            self.entity_culling_precheck,
+            self.particle_culling.name(),
             self.leaf_culling.name(),
+            bool_text(self.opaque_ice),
             bool_text(self.cache_shulker_boxes),
             bool_text(self.cache_signs),
             bool_text(self.cache_decorated_pots),
@@ -868,6 +1079,7 @@ impl Graphics {
             bool_text(self.fxaa),
             bool_text(self.taa),
             self.upscaling.name(),
+            self.upscaling_sharpness,
             self.screenshot_quality,
             self.frame_generation.name(),
             bool_text(self.hdr),
@@ -875,12 +1087,15 @@ impl Graphics {
             self.hdr_peak,
             self.hdr_black_level,
             self.hdr_ui_brightness,
+            bool_text(self.hdr_lighting),
             self.hdr_key,
             bool_text(self.battery),
             bool_text(self.shadow_cache),
             self.api.name(),
             self.shader_pack,
             bool_text(self.translucent_batching),
+            bool_text(self.hdr_smooth_gradients),
+            self.gpu_culling.key(),
         );
         text += &self.blue_map.serialize();
         text
@@ -895,6 +1110,11 @@ impl Graphics {
     }
     pub fn save(&self, dir: &Path) {
         let _ = fs::write(dir.join(FILE), self.serialize());
+    }
+    /// Whether a renderer made now draws its frame in 16 bits (`Renderer::new`'s `wide_frame`):
+    /// HDR on, with Smooth Gradients.
+    pub fn wide_frame(&self) -> bool {
+        self.hdr && self.hdr_smooth_gradients
     }
     /// Paper white, in nits: the player's, or on Auto the desktop's SDR white as the
     /// system reports it, else 203 (BT.2408's reference white).
@@ -933,8 +1153,9 @@ impl Graphics {
         // (horizon_threads: niced on Linux; on macOS and Windows the server
         // and render threads are raised above four cores, where vanilla
         // raises its server thread). Leaving two idled a core of a 4-thread
-        // laptop while a world loaded: a teleport there took ~15% longer.
-        let auto = horizon_threads::worker_count().saturating_sub(1).max(1);
+        // laptop while a world loaded: a teleport there took ~15% longer. On Apple
+        // silicon only the performance cores count (horizon_threads::default_workers).
+        let auto = horizon_threads::jobs::default_threads();
         if self.battery { auto.div_ceil(2) } else { auto }
     }
     /// The frame cap battery mode adds: 60 in a world, 30 in menus without a
@@ -1014,8 +1235,12 @@ mod tests {
                 servers: Vec::new(),
             },
             cave_culling: false,
+            gpu_culling: GpuCullingMode::On,
             entity_culling: EntityCullingMode::Synchronous,
+            entity_culling_precheck: 128,
+            particle_culling: ParticleCullingMode::Asynchronous,
             leaf_culling: LeafCullingMode::SolidAggressive,
+            opaque_ice: true,
             cache_shulker_boxes: true,
             cache_signs: true,
             cache_decorated_pots: true,
@@ -1039,6 +1264,7 @@ mod tests {
             fxaa: true,
             taa: true,
             upscaling: Upscaling::Balanced,
+            upscaling_sharpness: 40,
             screenshot_quality: 4,
             frame_generation: FrameGeneration::Fsr31,
             hdr: true,
@@ -1046,11 +1272,13 @@ mod tests {
             hdr_peak: 1400,
             hdr_black_level: 12,
             hdr_ui_brightness: 60,
+            hdr_lighting: false,
             hdr_key: "key.keyboard.h".into(),
             battery: true,
             shadow_cache: true,
             api: GraphicsApi::Dx12,
             translucent_batching: false,
+            hdr_smooth_gradients: false,
             shader_pack: "Golden Hour".into(),
         };
         assert_eq!(Graphics::parse(&g.serialize()), g);
@@ -1060,6 +1288,16 @@ mod tests {
                 ..Graphics::default()
             };
             assert_eq!(Graphics::parse(&graphics.serialize()), graphics);
+        }
+        for mode in ParticleCullingMode::ALL {
+            let graphics = Graphics {
+                particle_culling: mode,
+                ..Graphics::default()
+            };
+            assert_eq!(
+                Graphics::parse(&graphics.serialize()).particle_culling,
+                mode
+            );
         }
         assert_eq!(
             Graphics::parse("entityCulling:true\n").entity_culling,
@@ -1082,7 +1320,38 @@ mod tests {
         // off by default, not a choice.
         assert!(Graphics::default().translucent_batching);
         assert!(!Graphics::parse("batchTranslucent:false\n").translucent_batching);
+        // Smooth Gradients is on, and draws a 16-bit frame only with HDR on.
+        assert!(Graphics::default().hdr_smooth_gradients && !Graphics::default().wide_frame());
+        assert!(Graphics::parse("hdr:true\n").wide_frame());
+        assert!(!Graphics::parse("hdr:true\nhdrSmoothGradients:false\n").wide_frame());
         assert!(Graphics::parse("translucentBatching:false\n").translucent_batching);
+        // GPU Culling is opt-in: only the file or its switch turns it on.
+        assert_eq!(Graphics::default().gpu_culling, GpuCullingMode::Off);
+        assert_eq!(
+            Graphics::parse("gpuCulling:true\n").gpu_culling,
+            GpuCullingMode::On
+        );
+        // Auto is a third value of the same key. A file from before it reads as before, and an
+        // older Horizon reading `auto` finds a value it doesn't know and keeps Off.
+        assert_eq!(
+            Graphics::parse("gpuCulling:auto\n").gpu_culling,
+            GpuCullingMode::Auto
+        );
+        assert_eq!(
+            Graphics::parse("gpuCulling:false\n").gpu_culling,
+            GpuCullingMode::Off
+        );
+        assert_eq!(
+            Graphics::parse("gpuCulling:maybe\n").gpu_culling,
+            GpuCullingMode::Off
+        );
+        for mode in GpuCullingMode::ALL {
+            let g = Graphics {
+                gpu_culling: mode,
+                ..Graphics::default()
+            };
+            assert_eq!(Graphics::parse(&g.serialize()).gpu_culling, mode);
+        }
         // 0 is Auto; anything else is a peak the slider reaches.
         assert_eq!(Graphics::parse("hdrPeak:0\n").hdr_peak, 0);
         assert_eq!(Graphics::parse("hdrPeak:50\n").hdr_peak, 200);
@@ -1295,7 +1564,10 @@ mod tests {
         let g = Graphics::default();
         assert_eq!(g.workers, 0);
         let cores = horizon_threads::worker_count();
-        assert_eq!(g.worker_threads(), cores.saturating_sub(1).max(1));
+        assert!((1..=cores.saturating_sub(1).max(1)).contains(&g.worker_threads()));
+        if !cfg!(target_vendor = "apple") {
+            assert_eq!(g.worker_threads(), cores.saturating_sub(1).max(1));
+        }
         // A manual count is the player's own choice, kept as asked.
         let manual = Graphics { workers: 3, ..g };
         assert_eq!(manual.worker_threads(), 3);

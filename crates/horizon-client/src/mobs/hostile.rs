@@ -331,9 +331,9 @@ pub fn creeper_client_tick(m: &mut Mob) {
     if m.extra.flag {
         m.extra.counter = 1;
     }
-    m.swell = (m.swell + m.extra.counter).clamp(0, 30);
+    m.swell = (m.swell + m.extra.counter).max(0).min(m.max_swell);
 }
-/// Creeper.tick: advance the fuse and explode at 30.
+/// Creeper.tick: advance the fuse and explode at maxSwell.
 pub fn creeper_tick(m: &mut Mob, events: &mut Vec<MobEvent>) {
     if !m.alive() {
         return;
@@ -350,11 +350,19 @@ pub fn creeper_tick(m: &mut Mob, events: &mut Vec<MobEvent>) {
             1.0,
             0.5,
         ));
+        // Creeper.tick: `gameEvent(GameEvent.PRIME_FUSE)` with the sound.
+        events.push(MobEvent::GameEvent {
+            event: "minecraft:prime_fuse",
+            at: [m.position.x, m.position.y, m.position.z],
+            source: m.id,
+            state: horizon_world::registry::BlockStateId(0),
+        });
     }
     m.swell = (m.swell + dir).max(0);
-    if m.swell >= 30 {
-        m.swell = 30;
-        let radius = if m.extra.charged { 6.0 } else { 3.0 };
+    if m.swell >= m.max_swell {
+        m.swell = m.max_swell;
+        // explodeCreeper: `explosionRadius * (isPowered() ? 2.0F : 1.0F)`.
+        let radius = f32::from(m.extra.explosion_radius) * if m.extra.charged { 2.0 } else { 1.0 };
         let name = match &m.custom_name {
             Some(name) => crate::text::Text::literal(name.clone()),
             None => crate::text::Text::translate(
@@ -367,11 +375,13 @@ pub fn creeper_tick(m: &mut Mob, events: &mut Vec<MobEvent>) {
             charged: m.extra.charged,
             name,
             in_water: m.fluids.in_water,
+            kind: m.kind.id.clone(),
         });
         events.push(MobEvent::Explode(
             [m.position.x, m.position.y, m.position.z],
             radius,
             m.species(),
+            m.silent,
         ));
         // Creeper.spawnLingeringCloud: the effects it has make a cloud where it stood, after the
         // blast. A hidden effect (`hideParticles`) takes no part in the cloud's colour.

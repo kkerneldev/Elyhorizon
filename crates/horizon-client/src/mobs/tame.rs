@@ -155,7 +155,7 @@ fn baby_turtle_on_land(s: &super::Seen) -> bool {
 /// `universal_anger` rule on and no anger target left, any player. Creative and
 /// spectator players are dropped first (`isValidPlayerTarget`), by the goal's
 /// `can_target_player`.
-fn angry_at_player(m: &Mob, w: &MobWorld) -> bool {
+pub(super) fn angry_at_player(m: &Mob, w: &MobWorld) -> bool {
     m.extra.angry_at == Some(Who::Player)
         || (w.universal_anger && m.extra.anger > 0 && m.extra.angry_at.is_none())
 }
@@ -606,13 +606,14 @@ pub fn forgive_dead_player(m: &mut Mob) {
         stop_being_angry(m);
     }
 }
-/// `NeutralMob.updatePersistentAnger(level, true)` from `Wolf.aiStep`: any
-/// target (the attacker, a pack-mate's attacker the `HurtByTargetGoal` alert
-/// gave it, prey, the owner's enemy) is the anger's target, and the 20 to 39
-/// seconds of `PERSISTENT_ANGER_TIME` start over every tick it is held.
+/// `NeutralMob.updatePersistentAnger(level, true)` from `Wolf.aiStep` and
+/// `IronGolem.aiStep`: any target (the attacker, a pack-mate's attacker the
+/// `HurtByTargetGoal` alert gave it, prey, the owner's enemy, a golem's
+/// monster) is the anger's target, and the 20 to 39 seconds of
+/// `PERSISTENT_ANGER_TIME` (the same for both) start over every tick it is held.
 /// Without a target the anger runs out (`extra.anger` counts down to the end
 /// time), and anger at a mob ends when that mob dies.
-fn update_persistent_anger(m: &mut Mob, w: &MobWorld) {
+pub(super) fn update_persistent_anger(m: &mut Mob, w: &MobWorld) {
     let angry_at = m.extra.angry_at;
     if let Some(target @ Who::Mob(id)) = m.ai.target
         && w.seen(id).is_none_or(|s| !s.alive)
@@ -708,6 +709,12 @@ fn start_shaking(m: &mut Mob) {
     m.anim.v[SHAKE] = 0.0;
     m.anim.vo[SHAKE] = 0.0;
 }
+/// `Wolf.die`: the wet and shake state is cleared before the rest of the
+/// death, so a wolf killed mid-shake does not shake on the ground.
+pub fn die(m: &mut Mob) {
+    m.extra.flag2 = false;
+    cancel_shake(m);
+}
 /// `Wolf.cancelShake`: it stays wet.
 fn cancel_shake(m: &mut Mob) {
     m.extra.counter2 = 0;
@@ -740,6 +747,14 @@ fn shake_tick(m: &mut Mob, wet: bool, server: bool, events: &mut Vec<MobEvent>) 
             let pitch = (m.random.next_float() - m.random.next_float()) * 0.2 + 1.0;
             if server {
                 events.push(MobEvent::Sound("entity.wolf.shake", m.center(), 0.4, pitch));
+                // Wolf.tick: `gameEvent(GameEvent.ENTITY_ACTION)` with the sound (a client's
+                // level hears no game events).
+                events.push(MobEvent::GameEvent {
+                    event: "minecraft:entity_action",
+                    at: [m.position.x, m.position.y, m.position.z],
+                    source: m.id,
+                    state: horizon_world::registry::BlockStateId(0),
+                });
             }
         }
         m.anim.vo[SHAKE] = m.anim.v[SHAKE];
@@ -1062,6 +1077,11 @@ impl Goal for CatTempt {
         !m.extra.tame && self.0.can_use(m, cx)
     }
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
+        // `CatTemptGoal` has no `canContinueToUse`: `TemptGoal`'s calls
+        // `canUse()` again, so `!isTame()` is re-checked mid-tempt.
+        if m.extra.tame {
+            return false;
+        }
         // CatTemptGoal.canScare: a selected player that is the tempter is not scared.
         let picked = self.1.is_some() && self.1 == cx.w.player.as_ref().map(|p| p.uuid);
         let scare = self.0.can_scare;
@@ -1203,11 +1223,12 @@ impl Goal for CatRelaxOnOwner {
         // The `gameplay/cat_waking_up_gift_chance` of the `day` timeline: 0.7
         // from tick 23667 of the day to tick 362 of the next, 0 in between.
         let day = cx.w.day_time.rem_euclid(24000);
-        let chance = if !cx.w.nether && !cx.w.end && !(362..23667).contains(&day) {
-            0.7
-        } else {
-            0.0
-        };
+        let chance =
+            if cx.w.dimension_type.has_timeline("minecraft:day") && !(362..23667).contains(&day) {
+                0.7
+            } else {
+                0.0
+            };
         if cx
             .w
             .player
@@ -1688,6 +1709,32 @@ mod tests {
     use horizon_core::geometry::Vec3;
     use std::sync::Arc;
 
+    /// Wolf.tick: a shake starting posts ENTITY_ACTION with its sound, on the server only.
+    #[test]
+    fn a_shake_posts_entity_action_on_the_server() {
+        let shaking_wolf = || {
+            let mut kind = kind();
+            let k = Arc::make_mut(&mut kind);
+            k.id = "minecraft:wolf".into();
+            k.species = Species::Wolf;
+            let mut m = Mob::new(1, kind, Vec3::ZERO, 0.0);
+            m.extra.counter2 = 1;
+            m
+        };
+        let action = |events: &[MobEvent]| {
+            events.iter().any(|e| {
+                matches!(e, MobEvent::GameEvent { event, source: 1, .. }
+                    if *event == "minecraft:entity_action")
+            })
+        };
+        let mut events = Vec::new();
+        shake_tick(&mut shaking_wolf(), false, true, &mut events);
+        assert!(action(&events), "the server's wolf posts entity_action");
+        let mut events = Vec::new();
+        shake_tick(&mut shaking_wolf(), false, false, &mut events);
+        assert!(!action(&events), "a client's copy posts nothing");
+    }
+
     const WHITE: u32 = 0xFFFF_FFFF;
 
     fn cat() -> Mob {
@@ -1730,6 +1777,25 @@ mod tests {
         let mut m = Mob::new(1, kind, Vec3::ZERO, 0.0);
         m.on_ground = true;
         m
+    }
+    /// `Wolf.die`: the wet flag, the shake counter and both shake animations
+    /// are cleared before any loot is rolled. The death runs
+    /// `drops::death_state` first, so the reset has to be asked there, not
+    /// only exist.
+    #[test]
+    fn a_wolf_that_dies_mid_shake_is_dry_and_still() {
+        let mut m = wolf();
+        // Soaked, and shaking it off: the tick sets the wet flag and entity
+        // event 8 starts the shake, which counts up 0.05 a tick.
+        m.extra.flag2 = true;
+        entity_event(&mut m, 8);
+        m.anim.v[SHAKE] = 0.9;
+        m.anim.vo[SHAKE] = 0.85;
+        crate::mobs::drops::death_state(&mut m);
+        assert!(!m.extra.flag2, "a dead wolf is not wet");
+        assert_eq!(m.extra.counter2, 0, "a dead wolf is not shaking");
+        assert_eq!(m.anim.v[SHAKE], 0.0, "shakeAnim");
+        assert_eq!(m.anim.vo[SHAKE], 0.0, "shakeAnimO");
     }
     fn entity_events(events: &[MobEvent]) -> Vec<i8> {
         events
@@ -1874,6 +1940,51 @@ mod tests {
         assert!(m.damage(1.0, Damage::player([0.0, 64.0, 1.0])));
         assert!(m.extra.sitting);
     }
+
+    /// `Cat.canMate` and `Wolf.canMate`: the seeker only has to be tamed, so a
+    /// mob ordered to sit still goes looking for a mate. Only a wolf's
+    /// *partner* is refused while it sits (`wolf.isInSittingPose()`), which is
+    /// the one sitting check vanilla makes.
+    #[test]
+    fn a_sitting_tame_mob_still_looks_for_a_mate() {
+        use crate::mobs::goals::{Breed, Cx, Goal};
+        use crate::mobs::world::with_test_world;
+        let named = |species, name: &str, id: u32, sat: bool| {
+            let mut m = sitting(species, name);
+            m.id = id;
+            m.extra.in_love = 600;
+            m.extra.sitting = sat;
+            m
+        };
+        for (species, name, seeker_sat, partner_sat, breeds) in [
+            // A tamed cat pairs with a tamed cat, sitting or not.
+            (Species::Cat, "minecraft:cat", true, true, true),
+            (Species::Cat, "minecraft:cat", true, false, true),
+            // A wolf pairs unless the wolf it would take is sitting.
+            (Species::Wolf, "minecraft:wolf", true, false, true),
+            (Species::Wolf, "minecraft:wolf", true, true, false),
+            (Species::Wolf, "minecraft:wolf", false, true, false),
+        ] {
+            let mut seeker = named(species, name, 1, seeker_sat);
+            let partner = named(species, name, 2, partner_sat);
+            let seen = [partner.seen(None)];
+            with_test_world(&seen, |w, _| {
+                let mut events = Vec::new();
+                let mut lr = horizon_core::random::LegacyRandom::new(0);
+                let mut cx = Cx {
+                    w,
+                    lr: &mut lr,
+                    events: &mut events,
+                };
+                let mut goal = Breed::new(1.0);
+                assert_eq!(
+                    goal.can_use(&mut seeker, &mut cx),
+                    breeds,
+                    "{name}: seeker sits {seeker_sat}, partner sits {partner_sat}"
+                );
+            });
+        }
+    }
 }
 
 /// `NeutralMob.isAngryAtAllPlayers`: with the `universal_anger` game rule on, a
@@ -1926,5 +2037,57 @@ mod universal_anger_tests {
                 );
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod cat_tempt_tests {
+    use super::*;
+    use crate::mobs::world::{test_player, with_test_world};
+    use horizon_core::{geometry::Vec3, random::LegacyRandom};
+    use std::sync::Arc;
+
+    /// `CatTemptGoal` overrides `canUse` with `!cat.isTame()`, and inherits
+    /// `TemptGoal.canContinueToUse`, which calls `canUse()` again: taming the
+    /// cat mid-tempt ends the goal. Horizon's `CatTempt::can_continue` ran the
+    /// base tempt continue, which never asked whether the cat was tamed.
+    #[test]
+    fn a_tamed_cat_stops_being_tempted() {
+        let mut outcomes = None;
+        let ran = with_test_world(&[], |w, types| {
+            let kind = Arc::new(types.types["minecraft:cat"].clone());
+            let food = kind.food.clone();
+            let mut m = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
+            let mut world = w.clone();
+            let mut p = test_player(Vec3::new(2.5, 64.0, 0.5));
+            p.main_hand = Some("minecraft:cod".into());
+            world.player = Some(p);
+            m.ai.goals.add(
+                4,
+                CatTempt(super::super::goals::Tempt::new(0.6, food, true), None),
+            );
+            let mut lr = LegacyRandom::new(0);
+            let mut events = Vec::new();
+            let mut cx = Cx {
+                w: &world,
+                lr: &mut lr,
+                events: &mut events,
+            };
+            let mut goals = std::mem::take(&mut m.ai.goals);
+            goals.tick(&mut m, &mut cx);
+            let started = goals.is_running("CatTempt");
+            m.extra.tame = true;
+            goals.tick(&mut m, &mut cx);
+            outcomes = Some((started, goals.is_running("CatTempt")));
+            m.ai.goals = goals;
+        });
+        if !ran {
+            return;
+        }
+        assert_eq!(
+            outcomes,
+            Some((true, false)),
+            "a wild cat is tempted; once tamed the same goal must stop"
+        );
     }
 }

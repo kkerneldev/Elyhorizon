@@ -3,7 +3,7 @@
 //! celestial angles and star brightness for the overworld day cycle.
 use crate::Result;
 use serde_json::Value;
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, path::Path};
 
 #[derive(Clone, Copy, Debug)]
 enum Easing {
@@ -120,7 +120,7 @@ pub struct Environment {
     tracks: HashMap<String, Track>,
     base: HashMap<String, [f32; 4]>,
 }
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Sky {
     pub sky_color: [f32; 3],
     pub fog_color: [f32; 3],
@@ -151,13 +151,13 @@ impl Environment {
     /// A dimension's base attributes, optionally driven by the day timeline.
     pub fn load_dimension(root: &Path, dimension: &str, day_cycle: bool) -> Result<Self> {
         let timeline: Value = if day_cycle {
-            serde_json::from_slice(&fs::read(root.join("data/minecraft/timeline/day.json"))?)?
+            horizon_world::json_file::read(&root.join("data/minecraft/timeline/day.json"))?
         } else {
             serde_json::json!({"period_ticks": 24000, "tracks": {}})
         };
-        let dimension: Value = serde_json::from_slice(&fs::read(
-            root.join(format!("data/minecraft/dimension_type/{dimension}.json")),
-        )?)?;
+        let dimension: Value = horizon_world::json_file::read(
+            &root.join(format!("data/minecraft/dimension_type/{dimension}.json")),
+        )?;
         let mut tracks = HashMap::new();
         for (name, track) in timeline["tracks"].as_object().ok_or("invalid timeline")? {
             let easing = match &track["ease"] {
@@ -399,8 +399,11 @@ pub fn apply_weather(sky: &mut Sky, rain: f32, thunder: f32) {
 pub fn sky_darken(environment: &Environment, day_time: i64, rain: f32, thunder: f32) -> i32 {
     let mut sky = environment.sample(day_time, None, None);
     apply_weather(&mut sky, rain, thunder);
-    // Level.updateSkyBrightness: darkening from the sky light level.
-    (15.0 - 15.0 * sky.sky_light_level).round() as i32
+    // Level.updateSkyBrightness: `(int)(15.0F - skyLightLevel)`, the float
+    // truncated, not rounded (#11323): the darkening steps up only once the
+    // light has fallen a whole level. `sky_light_level` is the attribute as a
+    // fraction of 15, so the product is its raw value in `f32`.
+    (15.0 - 15.0 * sky.sky_light_level) as i32
 }
 
 #[cfg(test)]

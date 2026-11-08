@@ -9,12 +9,81 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::Read,
     path::Path,
 };
 
+/// What `check` and the report say of a jar made for 1.20 or older that is not carried.
+pub const OLD_LAYOUT: &str =
+    "Made for Minecraft 1.20 or older: Horizon ports mods made for 1.21 and later.";
+
+/// The data folders 1.21 renamed to the singular, before and after: the tag folders in
+/// 24w19a, the others in 24w21a (pack format 45).
+const RENAMED_IN_1_21: [(&str, &str); 13] = [
+    ("recipes", "recipe"),
+    ("loot_tables", "loot_table"),
+    ("structures", "structure"),
+    ("advancements", "advancement"),
+    ("predicates", "predicate"),
+    ("item_modifiers", "item_modifier"),
+    ("functions", "function"),
+    ("tags/blocks", "tags/block"),
+    ("tags/items", "tags/item"),
+    ("tags/entity_types", "tags/entity_type"),
+    ("tags/fluids", "tags/fluid"),
+    ("tags/game_events", "tags/game_event"),
+    ("tags/functions", "tags/function"),
+];
+
+/// Data files mostly in folders named as before 1.21 (`recipes/`, `loot_tables/`,
+/// `tags/blocks/`, `structures/`...): the game doesn't read them, so the carry moves them
+/// to 1.21's names ([`renamed_in_1_21`]). Some 1.21 jars keep a stale plural folder beside the new one, and some
+/// 1.20 jars hold a tag folder or two in the singular, so the larger share decides.
+pub fn old_layout(names: &[String]) -> bool {
+    let (mut old, mut new) = (0usize, 0usize);
+    for n in names {
+        let p: Vec<&str> = n.split('/').collect();
+        // Files only: a folder entry (`data/m/recipes/`) is no vote.
+        if p.len() < 4 || p[0] != "data" || n.ends_with('/') {
+            continue;
+        }
+        let folder = if p[2] == "tags" && p.len() > 4 {
+            format!("tags/{}", p[3])
+        } else {
+            p[2].to_owned()
+        };
+        old += usize::from(RENAMED_IN_1_21.iter().any(|(before, _)| *before == folder));
+        new += usize::from(RENAMED_IN_1_21.iter().any(|(_, after)| *after == folder));
+    }
+    old > new
+}
+
+/// The 1.21 name of a data file in a folder 1.21 renamed (`data/m/recipes/a.json` is
+/// `data/m/recipe/a.json`, `data/c/tags/items/a.json` is `data/c/tags/item/a.json`);
+/// `None` for any other entry.
+pub fn renamed_in_1_21(name: &str) -> Option<String> {
+    let (ns, rest) = name.strip_prefix("data/")?.split_once('/')?;
+    RENAMED_IN_1_21.iter().find_map(|(before, after)| {
+        let file = rest.strip_prefix(before)?.strip_prefix('/')?;
+        (!file.is_empty() && !file.ends_with('/')).then(|| format!("data/{ns}/{after}/{file}"))
+    })
+}
+
+/// A recipe result naming its item as `item`, as before 1.20.5; 26.3 reads only `id`
+/// (or a bare id) and skips the recipe.
+fn result_before_1_20_5(recipe: &Value) -> bool {
+    let r = &recipe["result"];
+    r.get("item").is_some() && r.get("id").is_none()
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct Report {
+    /// Made for 1.20 or older ([`old_layout`]): its data files were carried under 1.21's
+    /// folder names, their JSON as it was.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub old_layout: bool,
+    /// Data files moved from a folder 1.21 renamed to its new name ([`renamed_in_1_21`]).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub folders_renamed: usize,
     pub copied: usize,
     /// Namespaces besides the mod id its content owns ([`extra_namespaces`]),
     /// listed in the manifest's `namespaces`.
@@ -35,8 +104,11 @@ pub struct Report {
     pub loot_tables_added: usize,
     /// Worldgen and structure files (`data/<id>/worldgen/`, `structure/`).
     pub worldgen: usize,
-    /// Recipes left as they were: custom types, NeoForge conditions.
+    /// Recipes left as they were: custom types, NeoForge conditions, results before 1.20.5.
     pub recipes_kept: Vec<String>,
+    /// Of those, the recipes whose result names its item as `item` ([`result_before_1_20_5`]).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub recipes_old_result: usize,
     /// Recipes whose result is one of the mod's own items that isn't declared (its block was
     /// left out), moved to `outside/`: vanilla refuses a recipe for an unknown item, and the
     /// game would craft air.
@@ -63,6 +135,10 @@ pub struct Report {
     pub worldgen_types: crate::worldgen::Upgrade,
     /// The loader's convention biome tags the structures name, carried.
     pub convention_biome_tags: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// The pack around a mod being carried.
@@ -289,6 +365,30 @@ pub fn renamed_ids(v: &mut Value) -> bool {
         },
         Value::Array(a) => a.iter_mut().fold(false, |c, x| renamed_ids(x) | c),
         Value::Object(o) => o.values_mut().fold(false, |c, x| renamed_ids(x) | c),
+        _ => false,
+    }
+}
+
+/// Every string of a model or block state file that is a renamed id's block or
+/// item model or texture (`minecraft:block/chain`, `item/chain`) set to the
+/// new one's, in place; whether any was. 26.3 has only `iron_chain`'s.
+pub fn renamed_assets(v: &mut Value) -> bool {
+    match v {
+        Value::String(s) => {
+            let path = s.strip_prefix("minecraft:").unwrap_or(s);
+            let renamed = RENAMED_IDS.iter().find_map(|(old, new)| {
+                let (old, new) = (
+                    old.strip_prefix("minecraft:")?,
+                    new.strip_prefix("minecraft:")?,
+                );
+                ["block/", "item/"].iter().find_map(|kind| {
+                    (path.strip_prefix(kind)? == old).then(|| format!("minecraft:{kind}{new}"))
+                })
+            });
+            renamed.map(|new| *s = new).is_some()
+        }
+        Value::Array(a) => a.iter_mut().fold(false, |c, x| renamed_assets(x) | c),
+        Value::Object(o) => o.values_mut().fold(false, |c, x| renamed_assets(x) | c),
         _ => false,
     }
 }
@@ -625,12 +725,17 @@ fn shared_tag(root: &str, ns: &str, rest: &str) -> bool {
     root == "data" && (ns == "minecraft" || ns == "c") && rest.starts_with("tags/")
 }
 
+/// Sources a mod adds to vanilla's atlases, which the game appends to vanilla's as a reload does.
+fn shared_atlas(root: &str, ns: &str, rest: &str) -> bool {
+    root == "assets" && ns == "minecraft" && rest.starts_with("atlases/") && rest.ends_with(".json")
+}
+
 /// Where a jar entry goes: `Some(true)` inside the content mod (its own
-/// namespaces, additions to vanilla and convention tags), `Some(false)`
-/// to `outside/`, `None` not carried (code, metadata).
+/// namespaces, additions to vanilla and convention tags and to vanilla's
+/// atlases), `Some(false)` to `outside/`, `None` not carried (code, metadata).
 fn place(name: &str, owned: &[&str]) -> Option<bool> {
     let (root, ns, rest) = split(name)?;
-    Some(owned.contains(&ns) || shared_tag(root, ns, rest))
+    Some(owned.contains(&ns) || shared_tag(root, ns, rest) || shared_atlas(root, ns, rest))
 }
 
 /// Namespaces no carried mod claims: vanilla's, the convention tags', the
@@ -664,6 +769,7 @@ fn extra_namespaces(
     }
     // The JSON files that could be the mod's, by namespace ("" for tag additions).
     let mut texts: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut budget = crate::entry::Budget::archive();
     for i in 0..zip.len() {
         let Ok(mut entry) = zip.by_index(i) else {
             continue;
@@ -679,8 +785,12 @@ fn extra_namespaces(
             _ if ns == id || candidates.contains(ns) => ns.to_owned(),
             _ => continue,
         };
-        let mut bytes = Vec::new();
-        if name.ends_with(".json") && entry.read_to_end(&mut bytes).is_ok() {
+        if !name.ends_with(".json") {
+            continue;
+        }
+        let declared = entry.size();
+        // Too large or past the jar's ceiling: left out, as an unreadable file is.
+        if let Ok(bytes) = budget.read(&mut entry, declared, crate::entry::MAX_TEXT) {
             texts.push((ns, bytes));
         }
     }
@@ -850,10 +960,29 @@ pub fn carry(
     }
     let file = fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("{}: {e}", jar.display()))?;
+    // The previous harness verdict describes the content we are about to replace.
+    let verdict = out.join("harness/result.json");
+    if let Err(e) = fs::remove_file(&verdict)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(format!("{}: {e}", verdict.display()));
+    }
     let (inside, outside) = (out.join("carry"), out.join("outside"));
     let _ = fs::remove_dir_all(&inside);
     let _ = fs::remove_dir_all(&outside);
     let mut report = Report::default();
+    let names: Vec<String> = zip
+        .file_names()
+        .map(|name| name.map(|name| name.into_owned()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("{}: {e}", jar.display()))?;
+    // A 1.20 jar's data goes under 1.21's folder names. A file the jar also holds under
+    // the new name keeps it, and the plural copy stays where it was, unread as in a 1.21 jar.
+    let old = old_layout(&names);
+    report.old_layout = old;
+    let present: BTreeSet<&str> = names.iter().map(String::as_str).collect();
+    let rename =
+        |name: &str| renamed_in_1_21(name).filter(|new| old && !present.contains(new.as_str()));
     let mut blockstates: BTreeMap<String, Value> = BTreeMap::new();
     let mut item_models = BTreeSet::new();
     // Models another item model's `overrides` switch to (trim looks, a bow's pull): variants, not items.
@@ -869,9 +998,14 @@ pub fn carry(
     let owned: Vec<&str> = std::iter::once(id.as_str())
         .chain(report.namespaces.iter().map(String::as_str))
         .collect();
+    let mut budget = crate::entry::Budget::archive();
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
         let name = entry.name().map_err(|e| e.to_string())?.into_owned();
+        let (name, renamed) = match rename(&name) {
+            Some(new) => (new, true),
+            None => (name, false),
+        };
         let Some(keep) = place(&name, &owned) else {
             continue;
         };
@@ -880,9 +1014,10 @@ pub fn carry(
         if name.split('/').any(|p| p == ".." || p.is_empty()) || name.contains(['\\', ':']) {
             continue;
         }
-        let mut bytes = Vec::new();
-        entry
-            .read_to_end(&mut bytes)
+        report.folders_renamed += usize::from(renamed);
+        let declared = entry.size();
+        let mut bytes = budget
+            .read(&mut entry, declared, crate::entry::MAX_FILE)
             .map_err(|e| format!("{name}: {e}"))?;
         let unreadable = if keep {
             unreadable(&name, &mut bytes)
@@ -913,6 +1048,14 @@ pub fn carry(
             {
                 report.worldgen += 1;
             }
+            if name.starts_with("assets/")
+                && (rel.starts_with("models/") || rel.starts_with("blockstates/"))
+                && name.ends_with(".json")
+                && let Ok(mut model) = serde_json::from_slice::<Value>(&bytes)
+                && renamed_assets(&mut model)
+            {
+                bytes = serde_json::to_vec_pretty(&model).unwrap_or(bytes);
+            }
             if let Some(file) = rel
                 .strip_prefix("recipe/")
                 .filter(|_| name.starts_with("data/"))
@@ -920,10 +1063,12 @@ pub fn carry(
                 if let Ok(mut recipe) = serde_json::from_slice::<Value>(&bytes) {
                     tags_used(&recipe, &mut convention);
                     let renamed = renamed_ids(&mut recipe);
-                    let upgraded = upgrade_recipe(&mut recipe);
+                    let old_result = result_before_1_20_5(&recipe);
+                    let upgraded = !old_result && upgrade_recipe(&mut recipe);
                     if upgraded {
                         report.recipes_upgraded += 1;
                     } else {
+                        report.recipes_old_result += usize::from(old_result);
                         report.recipes_kept.push(file.to_owned());
                     }
                     if upgraded || renamed {
@@ -1432,6 +1577,406 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn recarry_invalidates_the_verdict_before_replacing_content() {
+        use crate::{
+            inventory::Record,
+            report::{self, Status},
+        };
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("horizon-recarry-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let jar = dir.join("example.jar");
+        let payload = br#"{"variants":{"":{"model":"example:block/stone"}}}"#;
+        let mut zip = zip::ZipWriter::new(fs::File::create(&jar).unwrap());
+        zip.start_file(
+            "assets/example/blockstates/stone.json",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+        zip.write_all(payload).unwrap();
+        zip.finish().unwrap();
+        let work = dir.join("work");
+        let out = work.join("mods/example");
+        let verdict = out.join("harness/result.json");
+        let info = crate::jar::JarInfo {
+            mod_id: "example".into(),
+            ..Default::default()
+        };
+        let run = |source: &Path| {
+            carry(
+                source,
+                &info,
+                &out,
+                None,
+                &|_| true,
+                &Pack {
+                    loaded: &|_| true,
+                    mods: &|_| false,
+                },
+                &BTreeMap::new(),
+            )
+        };
+        let records = [Record {
+            key: "example".into(),
+            class: "content".into(),
+            tier: "data".into(),
+            ..Default::default()
+        }];
+        let row = || report::build(&records, &work).pop().unwrap();
+        run(&jar).unwrap();
+        fs::create_dir_all(verdict.parent().unwrap()).unwrap();
+        let green = br#"{"checks":{"blocks":{"passed":1,"failed":0}}}"#;
+        let untouched = work.join("mods/untouched/harness/result.json");
+        fs::create_dir_all(untouched.parent().unwrap()).unwrap();
+        fs::write(&untouched, green).unwrap();
+        for aggregate in [false, true] {
+            let result = if aggregate {
+                br#"{"passed":true,"checks":{"blocks":{"passed":1,"failed":0}}}"#.as_slice()
+            } else {
+                green.as_slice()
+            };
+            fs::write(&verdict, result).unwrap();
+            assert_eq!(row().status, Status::Ported);
+            run(&jar).unwrap();
+            assert_eq!(row().status, Status::Partial);
+            assert!(row().reason.contains("harness not run"));
+            assert!(!verdict.exists());
+            assert_eq!(fs::read(&untouched).unwrap(), green);
+        }
+        fs::write(&verdict, green).unwrap();
+        // An invalid archive has not changed the old content, so its evidence stays valid.
+        let bad = dir.join("invalid.jar");
+        fs::write(&bad, b"not a zip").unwrap();
+        assert!(run(&bad).is_err());
+        assert_eq!(row().status, Status::Ported);
+        assert_eq!(fs::read(&verdict).unwrap(), green);
+
+        // Opening this ZIP succeeds, but reading its payload fails the CRC after mutation starts.
+        let mut corrupt = fs::read(&jar).unwrap();
+        let offset = corrupt
+            .windows(payload.len())
+            .position(|w| w == payload)
+            .unwrap();
+        corrupt[offset] ^= 1;
+        fs::write(&bad, corrupt).unwrap();
+        assert!(run(&bad).is_err());
+        assert_eq!(row().status, Status::Partial);
+        assert!(!verdict.exists());
+        run(&jar).unwrap();
+        fs::write(&verdict, green).unwrap();
+        assert_eq!(row().status, Status::Ported);
+
+        // An invalidation error must leave the carried content alone.
+        fs::remove_file(&verdict).unwrap();
+        fs::create_dir(&verdict).unwrap();
+        let sentinel = out.join("carry/keep.txt");
+        fs::write(&sentinel, b"keep").unwrap();
+        assert!(run(&jar).is_err());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"keep");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 1.21 named every data folder in the singular, tags' too; a jar holding only
+    /// the plural ones is made for 1.20 or older, whichever of them it ships.
+    #[test]
+    fn old_layout_reads_every_folder_1_21_renamed() {
+        let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        for old in [
+            "data/m/recipes/a.json",
+            "data/m/loot_tables/blocks/a.json",
+            "data/m/structures/a.nbt",
+            "data/m/advancements/a.json",
+            "data/m/tags/blocks/a.json",
+            "data/c/tags/items/a.json",
+            "data/m/tags/entity_types/a.json",
+            "data/m/functions/a.mcfunction",
+        ] {
+            assert!(
+                old_layout(&names(&[old, "assets/m/lang/en_us.json"])),
+                "{old}"
+            );
+        }
+        for new in [
+            "data/m/recipe/a.json",
+            "data/m/structure/a.nbt",
+            "data/m/tags/block/a.json",
+        ] {
+            assert!(!old_layout(&names(&[new])), "{new}");
+            // A stale plural folder beside the singular ones is a 1.21 jar.
+            assert!(
+                !old_layout(&names(&[new, "data/m/tags/blocks/a.json"])),
+                "{new}"
+            );
+        }
+        // A 1.20 jar with a tag folder misnamed in the singular (Prominence II's
+        // forcemaster-class-mod: 49 files in plural folders, 3 in `tags/entity_type/`).
+        assert!(old_layout(&names(&[
+            "data/m/recipes/a.json",
+            "data/m/recipes/b.json",
+            "data/m/tags/items/a.json",
+            "data/m/tags/entity_type/a.json",
+        ])));
+        // Folder entries are no files: a 1.21 jar listing its stale plural folders.
+        assert!(!old_layout(&names(&[
+            "data/m/recipes/",
+            "data/m/tags/blocks/",
+            "data/m/recipe/a.json",
+        ])));
+        // Folders 1.21 kept as they were say nothing either way.
+        assert!(!old_layout(&names(&["data/m/worldgen/structure/a.json"])));
+        assert!(!old_layout(&names(&["assets/m/lang/en_us.json"])));
+    }
+
+    /// Every folder 1.21 renamed, as the Minecraft Wiki's 24w19a and 24w21a notes list them,
+    /// maps to its singular name; folders 1.21 kept and folder entries map to nothing.
+    #[test]
+    fn renames_each_folder_1_21_renamed() {
+        for (old, new) in [
+            ("data/m/recipes/a.json", "data/m/recipe/a.json"),
+            (
+                "data/m/loot_tables/blocks/a.json",
+                "data/m/loot_table/blocks/a.json",
+            ),
+            ("data/m/structures/a/b.nbt", "data/m/structure/a/b.nbt"),
+            ("data/m/advancements/a.json", "data/m/advancement/a.json"),
+            ("data/m/predicates/a.json", "data/m/predicate/a.json"),
+            (
+                "data/m/item_modifiers/a.json",
+                "data/m/item_modifier/a.json",
+            ),
+            (
+                "data/m/functions/a.mcfunction",
+                "data/m/function/a.mcfunction",
+            ),
+            ("data/m/tags/blocks/a.json", "data/m/tags/block/a.json"),
+            ("data/c/tags/items/a.json", "data/c/tags/item/a.json"),
+            (
+                "data/m/tags/entity_types/a.json",
+                "data/m/tags/entity_type/a.json",
+            ),
+            ("data/m/tags/fluids/a.json", "data/m/tags/fluid/a.json"),
+            (
+                "data/m/tags/game_events/a.json",
+                "data/m/tags/game_event/a.json",
+            ),
+            (
+                "data/minecraft/tags/functions/load.json",
+                "data/minecraft/tags/function/load.json",
+            ),
+        ] {
+            assert_eq!(renamed_in_1_21(old).as_deref(), Some(new), "{old}");
+        }
+        for kept in [
+            "data/m/recipe/a.json",
+            "data/m/tags/block/a.json",
+            "data/m/tags/worldgen/biome/a.json",
+            "data/m/tags/blocksmith/a.json",
+            "data/m/worldgen/structure/a.json",
+            "data/m/recipes/",
+            "assets/m/recipes/a.json",
+        ] {
+            assert_eq!(renamed_in_1_21(kept), None, "{kept}");
+        }
+    }
+
+    fn write_jar(jar: &Path, files: &[(&str, &[u8])]) {
+        let mut zip = zip::ZipWriter::new(fs::File::create(jar).unwrap());
+        for (name, body) in files {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(body).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    fn carry_alone(jar: &Path, out: &Path) -> Result<Report, String> {
+        let info = crate::jar::JarInfo {
+            mod_id: "example".into(),
+            ..Default::default()
+        };
+        let pack = Pack {
+            loaded: &|_| true,
+            mods: &|_| false,
+        };
+        carry(jar, &info, out, None, &|_| true, &pack, &BTreeMap::new())
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("horizon-{tag}-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A jar made for 1.20 or older names its data folders as before 1.21 (`recipes/`,
+    /// `loot_tables/`, `tags/blocks/`), which 26.3 does not read. The carry moves them to
+    /// 1.21's names. Their JSON stays 1.20's (a recipe result naming `item`, which 26.3
+    /// skips), so the report counts the mod as partial and says why.
+    #[test]
+    fn a_jar_made_for_1_20_is_carried_under_1_21_folder_names_as_partial() {
+        use crate::{
+            inventory::Record,
+            report::{self, Status},
+        };
+
+        let dir = temp_dir("old");
+        let jar = dir.join("old.jar");
+        let old_recipe = br#"{"type":"minecraft:crafting_shapeless","ingredients":[{"item":"minecraft:stone"}],"result":{"item":"example:stone"}}"#;
+        let tag_1_20 = br#"{"values":["example:stone","example:old"]}"#;
+        let tag_1_21 = br#"{"values":["example:stone"]}"#;
+        write_jar(
+            &jar,
+            &[
+                (
+                    "assets/example/blockstates/stone.json",
+                    br#"{"variants":{"":{"model":"example:block/stone"}}}"#,
+                ),
+                ("data/example/recipes/stone.json", old_recipe),
+                (
+                    "data/example/recipes/cobble.json",
+                    br#"{"type":"minecraft:crafting_shapeless","ingredients":[{"item":"minecraft:stone"}],"result":{"id":"minecraft:cobblestone"}}"#,
+                ),
+                (
+                    "data/example/loot_tables/blocks/stone.json",
+                    br#"{"type":"minecraft:block","pools":[]}"#,
+                ),
+                ("data/example/structures/hut.nbt", b"\x0a\0\0\0"),
+                ("data/example/advancements/root.json", br#"{"criteria":{}}"#),
+                ("data/minecraft/tags/blocks/mineable/pickaxe.json", tag_1_20),
+                // The same tag under 1.21's name too: that copy is the one the game reads.
+                ("data/minecraft/tags/block/mineable/pickaxe.json", tag_1_21),
+            ],
+        );
+        let work = dir.join("work");
+        let out = work.join("mods/example");
+        let report = carry_alone(&jar, &out).unwrap();
+        assert!(report.old_layout);
+        assert_eq!(report.folders_renamed, 5);
+        let carried = out.join("carry/data");
+        for moved in [
+            "example/recipe/stone.json",
+            "example/recipe/cobble.json",
+            "example/loot_table/blocks/stone.json",
+            "example/structure/hut.nbt",
+            "example/advancement/root.json",
+        ] {
+            assert!(carried.join(moved).exists(), "{moved}");
+        }
+        for gone in [
+            "example/recipes",
+            "example/loot_tables",
+            "example/structures",
+        ] {
+            assert!(!carried.join(gone).exists(), "{gone}");
+        }
+        let pickaxe = |folder: &str| {
+            fs::read(carried.join(format!("minecraft/tags/{folder}/mineable/pickaxe.json")))
+                .unwrap()
+        };
+        assert_eq!(pickaxe("block"), tag_1_21);
+        assert_eq!(pickaxe("blocks"), tag_1_20);
+        // The 1.20 result is kept as it was, not counted as upgraded.
+        assert_eq!(report.recipes_upgraded, 1);
+        assert_eq!(report.recipes_kept, ["stone.json"]);
+        assert_eq!(report.recipes_old_result, 1);
+        let stone: Value =
+            serde_json::from_slice(&fs::read(carried.join("example/recipe/stone.json")).unwrap())
+                .unwrap();
+        assert_eq!(stone, serde_json::from_slice::<Value>(old_recipe).unwrap());
+
+        let records = [Record {
+            key: "example".into(),
+            class: "content".into(),
+            tier: "data".into(),
+            jar: Some(jar.clone()),
+            ..Default::default()
+        }];
+        // Even a green harness leaves it partial: it checks blocks and items only.
+        let verdict = out.join("harness/result.json");
+        fs::create_dir_all(verdict.parent().unwrap()).unwrap();
+        fs::write(
+            &verdict,
+            br#"{"checks":{"blocks":{"passed":1,"failed":0}}}"#,
+        )
+        .unwrap();
+        let rows = report::build(&records, &work);
+        let row = &rows[0];
+        assert_eq!(row.status, Status::Partial);
+        assert!(row.old_layout);
+        assert!(row.reason.contains("1.20 or older"), "{}", row.reason);
+        assert!(!row.reason.contains("  "), "{}", row.reason);
+        assert!(
+            row.reason
+                .contains("(1 recipe result names `item`, which 26.3 skips; NBT"),
+            "{}",
+            row.reason
+        );
+        let s = report::summary(&rows);
+        assert_eq!((s.needing, s.carried, s.partial, s.later), (1, 1, 1, 0));
+
+        // The recipe count is left out when no result names `item`, and plural past one.
+        let report_file = out.join("carry-report.json");
+        let carried_report: Value =
+            serde_json::from_slice(&fs::read(&report_file).unwrap()).unwrap();
+        for (n, says) in [(0, "(NBT in loot"), (2, "(2 recipe results name `item`")] {
+            let mut c = carried_report.clone();
+            c["recipes_old_result"] = json!(n);
+            fs::write(&report_file, serde_json::to_vec(&c).unwrap()).unwrap();
+            let reason = &report::build(&records, &work)[0].reason;
+            assert!(reason.contains(says), "{reason}");
+        }
+
+        // An older build's report of the same jar carried nothing: not one Port can carry.
+        fs::write(
+            out.join("carry-report.json"),
+            br#"{"old_layout":true,"copied":0}"#,
+        )
+        .unwrap();
+        let rows = report::build(&records, &work);
+        assert_eq!(rows[0].status, Status::NotYet);
+        assert!(rows[0].plain.contains("1.20 or older"), "{}", rows[0].plain);
+        let s = report::summary(&rows);
+        assert_eq!((s.carried, s.ready, s.later), (0, 0, 1));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A 1.21 jar's stale plural folder is not moved over its singular one.
+    #[test]
+    fn a_1_21_jar_keeps_its_stale_plural_folder_where_it_is() {
+        let dir = temp_dir("new");
+        let jar = dir.join("new.jar");
+        let (stale, current) = (br#"{"values":["a:b"]}"#, br#"{"values":["a:c"]}"#);
+        write_jar(
+            &jar,
+            &[
+                ("data/example/tags/items/gems.json", stale),
+                ("data/example/tags/item/gems.json", current),
+                ("data/example/tags/item/ores.json", current),
+            ],
+        );
+        let out = dir.join("out");
+        let report = carry_alone(&jar, &out).unwrap();
+        assert!(!report.old_layout);
+        assert_eq!(report.folders_renamed, 0);
+        let tag = |folder: &str| {
+            fs::read(out.join(format!("carry/data/example/tags/{folder}/gems.json"))).unwrap()
+        };
+        assert_eq!(tag("item"), current);
+        assert_eq!(tag("items"), stale);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// YUNG's pools carry comments, which Minecraft's lenient reader skips;
     /// the carry holds them as plain JSON. A comment marker inside a string
@@ -2115,6 +2660,53 @@ mod tests {
         assert_eq!(report.copied, 0);
         assert!(report.outside.is_empty());
         assert!(!dir.join("evil.json").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A 1.21.1 model drawing vanilla's chain is carried with 26.3's
+    /// `iron_chain` model and texture; other ids that start alike stay.
+    #[test]
+    fn carried_models_name_the_renamed_chain() {
+        let dir =
+            std::env::temp_dir().join(format!("horizon-port-pack-chain-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let jar = dir.join("pulley-1.0.jar");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&jar).unwrap());
+        for (name, text) in [
+            (
+                "META-INF/neoforge.mods.toml",
+                "license = \"MIT\"\n[[mods]]\nmodId = \"pulley\"\nversion = \"1.0\"\n",
+            ),
+            (
+                "assets/pulley/models/block/pulley.json",
+                r#"{"parent": "block/chain", "textures": {"0": "minecraft:block/chain",
+                    "1": "item/chain", "2": "pulley:block/chain",
+                    "3": "minecraft:block/chain_command_block_back"}}"#,
+            ),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let info = crate::jar::read(&jar).unwrap();
+        let out = dir.join("work/mods/pulley");
+        let pack = Pack {
+            loaded: &|_| true,
+            mods: &|_| false,
+        };
+        carry(&jar, &info, &out, None, &|_| true, &pack, &BTreeMap::new()).unwrap();
+        let model: Value = serde_json::from_slice(
+            &fs::read(out.join("carry/assets/pulley/models/block/pulley.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            model,
+            json!({"parent": "minecraft:block/iron_chain", "textures": {
+                "0": "minecraft:block/iron_chain", "1": "minecraft:item/iron_chain",
+                "2": "pulley:block/chain", "3": "minecraft:block/chain_command_block_back"}})
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }
