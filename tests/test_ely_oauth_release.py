@@ -9,9 +9,13 @@ class ReleaseConfigurationTests(unittest.TestCase):
                 gate.check(client_id, lambda *_: self.fail("network used without an ID"))
 
     def test_public_flow_checks_pkce_and_secret_free_exchange(self):
+        redirects = []
+
         def service(path, fields=None, post=False):
             if fields:
                 self.assertNotIn("client_secret", fields)
+                if "redirect_uri" in fields:
+                    redirects.append(fields["redirect_uri"])
             if path.startswith("/.well-known/"):
                 return 200, dict(issuer=gate.ISSUER, code_challenge_methods_supported=["S256"], token_endpoint_auth_methods_supported=["none"])
             if post:
@@ -24,6 +28,12 @@ class ReleaseConfigurationTests(unittest.TestCase):
                 return 400, dict(parameter="code_challenge_method")
             return 200, dict(success=True)
         gate.check("public-desktop", service)
+        self.assertEqual(redirects, [
+            "http://127.0.0.1:38467/oauth/ely",
+            "http://127.0.0.1:38467/oauth/ely",
+            "http://127.0.0.1:38467/oauth/ely",
+            "http://127.0.0.1:38467/oauth/ely",
+        ])
 
     def test_website_registration_is_rejected_even_if_pkce_is_supported_globally(self):
         def service(path, *_):

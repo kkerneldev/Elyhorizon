@@ -45,7 +45,7 @@ def check(client_id, send=request):
         raise ValueError("Ely.by does not advertise the required public S256 PKCE flow; refusing to publish.")
     verifier = secrets.token_urlsafe(32)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-    fields = dict(client_id=client_id.strip(), redirect_uri="http://127.0.0.1:43210/oauth/ely",
+    fields = dict(client_id=client_id.strip(), redirect_uri="http://127.0.0.1:38467/oauth/ely",
                   response_type="code", scope=SCOPES, state=secrets.token_urlsafe(32))
     status, value = send("/api/oauth2/v1/validate", fields)
     if value.get("error") == "invalid_client":
