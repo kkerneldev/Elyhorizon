@@ -2551,3 +2551,82 @@ fn joining_a_service_id_tells_mojangs_session_server() {
     );
     assert!(refused.unwrap_err().contains("Sign in again"));
 }
+
+#[test]
+fn splitscreen_hands_over_ely_identity_without_claiming_microsoft_ownership() {
+    let store = MemoryStore::default();
+    let mut accounts = signed_in(&store, &secrets("ms-token", true));
+    let ely = Account {
+        uuid: format!("ely:{UUID}"),
+        name: "ElyPlayer".into(),
+        skin: None,
+        cape: None,
+    };
+    let credential = Secrets {
+        ely: true,
+        ..secrets("ely-game-token", false)
+    };
+    accounts.add(&store, ely, &credential).unwrap();
+    accounts.selected = Some(UUID.into());
+    let dir = std::env::temp_dir().join(format!("hz-split-ely-{}", std::process::id()));
+    let env = account_sessions_until(
+        &offline(),
+        Some("test-client"),
+        &store,
+        &dir,
+        &mut accounts,
+        Instant::now(),
+    );
+    let list: Vec<Value> = serde_json::from_str(&env[0].1).unwrap();
+    assert_eq!(list[0]["uuid"], UUID);
+    let path = PathBuf::from(list[0]["file"].as_str().unwrap());
+    let session: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(session["name"], "ElyPlayer");
+    assert_eq!(session["uuid"], UUID);
+    assert_eq!(session["user_type"], "elyby");
+    assert_eq!(session["access_token"], "ely-game-token");
+    assert!(session.get("refresh_token").is_none());
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(dir).unwrap();
+}
+
+#[test]
+fn a_missing_ely_credential_refuses_play_without_changing_the_selected_identity() {
+    let store = MemoryStore::default();
+    let ely = Account {
+        uuid: format!("ely:{UUID}"),
+        name: "ElyPlayer".into(),
+        skin: None,
+        cape: None,
+    };
+    let mut accounts = Accounts {
+        selected: Some(ely.uuid.clone()),
+        accounts: vec![ely.clone()],
+        ..Accounts::default()
+    };
+    let result = launch_for_game(&offline(), None, &store, &mut accounts, false);
+    assert_eq!(result.unwrap_err().to_string(), ely::EXPIRED);
+    assert_eq!(accounts.selected, Some(ely.uuid));
+    assert_eq!(accounts.accounts[0].name, "ElyPlayer");
+}
+
+#[test]
+fn ely_accounts_are_not_used_to_prove_a_mojang_identity() {
+    let store = MemoryStore::default();
+    let account = Account {
+        uuid: format!("ely:{UUID}"),
+        name: "ElyPlayer".into(),
+        skin: None,
+        cape: None,
+    };
+    let refused = session::join_server_with(
+        &offline(),
+        "http://127.0.0.1:1",
+        None,
+        &store,
+        &account,
+        &PathBuf::from("unused-ely-profile.json"),
+        "one-time-challenge",
+    );
+    assert_eq!(refused.unwrap_err(), "Mojang account verification requires a Microsoft account that owns Minecraft: Java Edition.");
+}

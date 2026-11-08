@@ -5866,6 +5866,7 @@ pub fn {f}("
             name: String::new(),
             body: String::new(),
             date: String::new(),
+            time: String::new(),
             asset: Some(("https://example.com/launcher.zip".into(), 1)),
             prerelease: false,
             nightly: None,

@@ -5,7 +5,7 @@ pub mod oauth;
 
 pub const AUTH_SERVER: &str = "https://authserver.ely.by";
 pub const TWO_FACTOR: &str = "This Ely.by account requires a two-factor authentication code.";
-const EXPIRED: &str = "Your Ely.by sign-in expired. Sign in again.";
+pub(super) const EXPIRED: &str = "Your Ely.by sign-in expired. Sign in again.";
 
 /// Pinned official binary, not bundled in the public tree. Verified on every use.
 /// https://authlib-injector.yushi.moe/artifact/latest.json (build 56).

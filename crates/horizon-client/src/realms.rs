@@ -158,7 +158,7 @@ pub struct RestoreTask {
 /// The account Realms may use: the launcher's Microsoft session (it hands one over only for
 /// an account that owns the game) while its token is good.
 fn session() -> Option<Arc<AuthSession>> {
-    auth::current().filter(|s| !s.expired())
+    auth::current().filter(|s| !s.is_ely() && !s.expired())
 }
 
 fn client() -> Option<RealmsClient> {

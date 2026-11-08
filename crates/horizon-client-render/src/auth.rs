@@ -696,27 +696,33 @@ mod tests {
     #[test]
     #[ignore = "contacts the public Ely.by skin service"]
     fn ely_live_skin_reaches_the_game_texture_upload_queue() {
-        use crate::skins::{Download, Downloader, Kind};
+        use crate::skins::{Download, Downloader};
         let session = AuthSession::parse(r#"{"name":"ErickSkrauch","uuid":"ffc8fdc95824509e8a57c99b940fb996","access_token":"unused-public-profile-probe","user_type":"elyby"}"#).unwrap();
         let textures = own_textures(&session).expect("Ely public profile");
-        let url = textures.skin.as_deref().expect("Ely public skin URL");
+        assert!(textures.skin.is_some(), "Ely public skin URL");
         let root =
             std::env::temp_dir().join(format!("horizon-live-ely-skin-{}", std::process::id()));
         let mut downloads = Downloader::new(root.clone());
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            match downloads.state(Kind::Skin, url) {
-                Download::Ready => break,
-                Download::Failed => panic!("Ely skin did not decode into game pixels"),
-                Download::Pending if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(20))
-                }
-                Download::Pending => panic!("Ely skin download timed out"),
+        let location = loop {
+            let mut failed = false;
+            if let Some(location) = crate::skins::lookup(&textures, false, |kind, url| {
+                let state = downloads.state(kind, url);
+                failed |= state == Download::Failed;
+                state
+            }) {
+                break location;
             }
-        }
-        let location =
-            crate::skins::lookup(&textures, false, |kind, url| downloads.state(kind, url))
-                .expect("local Ely skin lookup");
+            assert!(
+                !failed,
+                "Ely profile textures did not decode into game pixels"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Ely texture download timed out"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
         let ready = downloads.take_ready();
         assert!(
             ready

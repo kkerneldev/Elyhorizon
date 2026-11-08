@@ -1286,5 +1286,6 @@
   "Ely.by browser sign-in timed out. Try again.": "Ely.by 浏览器登录超时。请重试。",
   "Use account ely-sign-in to sign in to Ely.by again.": "请使用 account ely-sign-in 重新登录 Ely.by。",
   "Sign-in cancelled.": "登录已取消。",
-  "Return to Elyhorizon to finish sign-in. You can close this browser tab.": "请返回 Elyhorizon 完成登录。可以关闭此浏览器标签页。"
+  "Return to Elyhorizon to finish sign-in. You can close this browser tab.": "请返回 Elyhorizon 完成登录。可以关闭此浏览器标签页。",
+  "Mojang account verification requires a Microsoft account that owns Minecraft: Java Edition.": "Mojang account verification requires a Microsoft account that owns Minecraft: Java Edition."
 }

@@ -355,6 +355,14 @@ impl Launcher {
                     .child(note),
             )
             .children(button)
+            .child(
+                div()
+                    .mt(px(24.))
+                    .child(
+                        ui::text(18., FontWeight::SEMIBOLD, ink::FULL).child(tr("Ely.by account")),
+                    )
+                    .child(self.ely_form(cx)),
+            )
             .when(configured, |d| {
                 d.child(
                     ui::text(12., FontWeight::NORMAL, 0.45)

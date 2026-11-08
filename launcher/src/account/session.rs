@@ -388,6 +388,9 @@ pub(super) fn join_server_with(
     accounts: &Path,
     server_id: &str,
 ) -> Result<(), String> {
+    if account.is_ely() {
+        return Err(crate::i18n::tr("Mojang account verification requires a Microsoft account that owns Minecraft: Java Edition.").into());
+    }
     let status = refresh_account(ep, client_id, store, account, accounts, &|_| {});
     if status.state != State::Ready {
         return Err(status.message);

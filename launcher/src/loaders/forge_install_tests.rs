@@ -405,6 +405,7 @@ fn a_real_installer_installs() {
         uuid: "00000000000000000000000000000000".into(),
         token: "none".into(),
         xuid: String::new(),
+        ely: false,
     };
     let command = crate::java_launch::command(
         &version,

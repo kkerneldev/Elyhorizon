@@ -1286,5 +1286,6 @@
   "Ely.by browser sign-in timed out. Try again.": "La connexion Ely.by dans le navigateur a expiré. Réessayez.",
   "Use account ely-sign-in to sign in to Ely.by again.": "Utilisez account ely-sign-in pour vous reconnecter à Ely.by.",
   "Sign-in cancelled.": "Connexion annulée.",
-  "Return to Elyhorizon to finish sign-in. You can close this browser tab.": "Revenez dans Elyhorizon pour terminer la connexion. Vous pouvez fermer cet onglet."
+  "Return to Elyhorizon to finish sign-in. You can close this browser tab.": "Revenez dans Elyhorizon pour terminer la connexion. Vous pouvez fermer cet onglet.",
+  "Mojang account verification requires a Microsoft account that owns Minecraft: Java Edition.": "Mojang account verification requires a Microsoft account that owns Minecraft: Java Edition."
 }

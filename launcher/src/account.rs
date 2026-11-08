@@ -2182,18 +2182,34 @@ pub fn launch_for_game(
     offline_without_owner: bool,
 ) -> Result<Launch, NoOwner> {
     if let Some(account) = accounts.selected().filter(|a| a.is_ely()).cloned() {
-        let _operation = session::lock(store).map_err(|why| NoOwner { keyring: Some(why.to_string()) })?;
-        let secrets = secrets_in(store, &account.uuid)
+        let _operation = session::lock(store).map_err(|why| NoOwner {
+            keyring: Some(why.to_string()),
+        })?;
+        let secrets = store
+            .get(&account.uuid)
+            .map_err(|why| NoOwner {
+                keyring: Some(crate::i18n::trf(
+                    "Can't read {name}'s sign-in: {why}",
+                    &[("name", &account.name), ("why", &why)],
+                )),
+            })?
+            .and_then(|text| serde_json::from_str::<Secrets>(&text).ok())
             .filter(|s| s.ely)
-            .ok_or_else(|| NoOwner { keyring: Some(ely::EXPIRED.to_string()) })?;
+            .ok_or_else(|| NoOwner {
+                keyring: Some(crate::i18n::tr(ely::EXPIRED).to_owned()),
+            })?;
         return match ely::refresh(&account, secrets) {
             Check::Owns(renewed, secrets) => {
                 store
                     .set(
                         &renewed.uuid,
-                        &serde_json::to_string(&secrets).map_err(|why| NoOwner { keyring: Some(why.to_string()) })?,
+                        &serde_json::to_string(&secrets).map_err(|why| NoOwner {
+                            keyring: Some(why.to_string()),
+                        })?,
                     )
-                    .map_err(|why| NoOwner { keyring: Some(why.to_string()) })?;
+                    .map_err(|why| NoOwner {
+                        keyring: Some(why.to_string()),
+                    })?;
                 accounts.update(renewed.clone());
                 Ok(Launch {
                     session: Some((renewed, secrets)),
@@ -2204,11 +2220,17 @@ pub fn launch_for_game(
                 store
                     .set(
                         &account.uuid,
-                        &serde_json::to_string(&secrets).map_err(|why| NoOwner { keyring: Some(why.to_string()) })?,
+                        &serde_json::to_string(&secrets).map_err(|why| NoOwner {
+                            keyring: Some(why.to_string()),
+                        })?,
                     )
-                    .map_err(|why| NoOwner { keyring: Some(why.to_string()) })?;
+                    .map_err(|why| NoOwner {
+                        keyring: Some(why.to_string()),
+                    })?;
                 if secrets.sign_in_required {
-                    return Err(NoOwner { keyring: Some(message) });
+                    return Err(NoOwner {
+                        keyring: Some(message),
+                    });
                 }
                 Ok(Launch {
                     session: Some((account, secrets)),
@@ -2216,7 +2238,9 @@ pub fn launch_for_game(
                     ..Launch::default()
                 })
             }
-            Check::DoesNot(_) => Err(NoOwner { keyring: Some(ely::EXPIRED.to_string()) }),
+            Check::DoesNot(_) => Err(NoOwner {
+                keyring: Some(crate::i18n::tr(ely::EXPIRED).to_owned()),
+            }),
         };
     }
     match launch(ep, client_id, store, accounts) {
@@ -2683,7 +2707,10 @@ fn account_sessions_until(
         // An account the services sent back to sign-in (a refused refresh, a token now for
         // another profile) is never handed over, whatever its token's time says.
         let holds = |s: &Secrets, margin: u64| {
-            s.owns && !s.sign_in_required && s.minecraft_expires_at > now() + margin
+            (s.owns || (account.is_ely() && s.ely))
+                && account.is_ely() == s.ely
+                && !s.sign_in_required
+                && s.minecraft_expires_at > now() + margin
         };
         let known = holds(&secrets, RENEW_BEFORE);
         let late = operation.is_err() || Instant::now() >= deadline;
@@ -2718,9 +2745,9 @@ fn account_sessions_until(
             continue;
         };
         match write_launch_session_file(dir, &account, &secrets) {
-            Ok(file) => {
-                list.push(json!({ "name": account.name, "uuid": account.uuid, "file": file }))
-            }
+            Ok(file) => list.push(
+                json!({ "name": account.name, "uuid": account.profile_uuid(), "file": file }),
+            ),
             Err(_) => list.push(fallback),
         }
     }
@@ -2760,7 +2787,7 @@ fn java_player_with(
     if accounts.selected().is_some_and(Account::is_ely) {
         let pass =
             launch_for_game(ep, client_id, store, accounts, false).map_err(|e| e.to_string())?;
-        let (account, secrets) = pass.session.ok_or_else(|| NoOwner.to_string())?;
+        let (account, secrets) = pass.session.ok_or_else(|| NoOwner::default().to_string())?;
         return Ok(crate::java_launch::Player {
             ely: true,
             uuid: account.profile_uuid().to_owned(),
