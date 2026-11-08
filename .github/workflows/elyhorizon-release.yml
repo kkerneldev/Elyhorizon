@@ -1,4 +1,4 @@
-name: Elyhorizon Windows release
+name: Elyhorizon release
 
 on:
   push:
@@ -165,8 +165,242 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  linux:
+    name: Linux x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      HORIZON_ELY_CLIENT_ID: ${{ vars.HORIZON_ELY_CLIENT_ID }}
+      HORIZON_MSA_CLIENT_ID: ${{ vars.HORIZON_MSA_CLIENT_ID }}
+      HORIZON_TELEMETRY_URL: 'off'
+      HORIZON_LAUNCHER_NO_SELF_UPDATE: '1'
+      HORIZON_NO_AUDIO: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Version and isolated test homes
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version=$INPUT_VERSION
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then version=${GITHUB_REF_NAME#elyhorizon-v}; fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || { echo '::error::Invalid release version'; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "HORIZON_LAUNCHER_VERSION=$version" >> "$GITHUB_ENV"
+          echo "HORIZON_LAUNCHER_TAG=elyhorizon-v$version" >> "$GITHUB_ENV"
+          echo "HORIZON_VERSION=$version" >> "$GITHUB_ENV"
+          scratch=$(mktemp -d)
+          for key in HORIZON_HOME HORIZON_LAUNCHER_HOME XDG_DATA_HOME XDG_CONFIG_HOME HORIZON_LAUNCHER_TRASH HORIZON_LAUNCHER_CLIPBOARD HORIZON_LAUNCHER_DESKTOP; do
+            mkdir -p "$scratch/$key"
+            echo "$key=$scratch/$key" >> "$GITHUB_ENV"
+          done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Require a valid public Ely.by Desktop registration
+        run: python tools/check_ely_oauth.py
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            launcher -> target
+          shared-key: elyhorizon-linux-release
+      - name: Linux build and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev libudev-dev libssl-dev pkg-config patchelf
+      - name: Check public files
+        run: python tools/check_public_tree.py
+      - name: Test launcher
+        run: cargo test --manifest-path launcher/Cargo.toml --release --locked --lib --bins
+      - name: Build launcher and matching client
+        run: |
+          cargo build --manifest-path launcher/Cargo.toml --release --locked --bin horizon-launcher
+          cargo build --release --locked -p horizon-client --bin horizon-client
+          python tools/check_imports.py target/release/horizon-client
+      - name: Package Linux archive and AppImage
+        run: |
+          set -euo pipefail
+          folder=dist/Elyhorizon
+          mkdir -p "$folder"
+          install -m755 launcher/target/release/horizon-launcher target/release/horizon-client "$folder/"
+          cp LICENSE THIRD_PARTY_NOTICES.md docs/elyby-account.md "$folder/"
+          cp packaging/linux/elyhorizon-readme.txt "$folder/README.txt"
+          tar -C dist -czf "dist/Elyhorizon-$VERSION-linux-x86_64.tar.gz" Elyhorizon
+          bash packaging/linux/appimage.sh launcher/target/release/horizon-launcher "$VERSION" dist target/release/horizon-client
+      - name: Verify packaged Linux executables and embedded authentication
+        run: |
+          set -euo pipefail
+          extracted=$(mktemp -d)
+          tar -xzf "dist/Elyhorizon-$VERSION-linux-x86_64.tar.gz" -C "$extracted"
+          for binary in horizon-launcher horizon-client; do
+            cmp "dist/Elyhorizon/$binary" "$extracted/Elyhorizon/$binary"
+          done
+          "$extracted/Elyhorizon/horizon-launcher" --version
+          "$extracted/Elyhorizon/horizon-client" --help > /dev/null
+          image="$PWD/dist/Elyhorizon-$VERSION-linux-x86_64.AppImage"
+          expected="$HORIZON_ELY_CLIENT_ID"
+          unset HORIZON_ELY_CLIENT_ID HORIZON_ELY_CLIENT_SECRET HORIZON_ELY_REDIRECT_URI
+          export HORIZON_LAUNCHER_HOME="$(mktemp -d)"
+          "$extracted/Elyhorizon/horizon-launcher" --json account ely-status > archive-auth.json
+          "$image" --appimage-extract-and-run --json account ely-status > appimage-auth.json
+          for result in archive-auth.json appimage-auth.json; do
+            jq -e --arg id "$expected" '.client_id == $id and .bundled_client_id == $id and .flow == "authorization_code_pkce" and .client_secret_required == false' "$result"
+          done
+          # Check that the AppImage really contains the matching client, beside the launcher.
+          appdir=$(mktemp -d)
+          (cd "$appdir" && "$image" --appimage-extract > /dev/null)
+          "$appdir/squashfs-root/usr/bin/horizon-client" --help > /dev/null
+          cp target/release/horizon-client "$extracted/patched-client"
+          patchelf --set-rpath '$ORIGIN/../lib' "$extracted/patched-client"
+          cmp "$extracted/patched-client" "$appdir/squashfs-root/usr/bin/horizon-client"
+      - name: Check AppImage startup on Arch Linux
+        run: |
+          set -euo pipefail
+          export EXPECTED_CLIENT_ID="$HORIZON_ELY_CLIENT_ID"
+          docker run --rm -v "$PWD/dist:/dist:ro" -e VERSION -e EXPECTED_CLIENT_ID archlinux:base bash -euc '
+            pacman -Syu --noconfirm --needed alsa-lib systemd-libs dbus libglvnd vulkan-icd-loader jq
+            scratch=$(mktemp -d)
+            for key in HORIZON_HOME HORIZON_LAUNCHER_HOME XDG_DATA_HOME XDG_CONFIG_HOME HORIZON_LAUNCHER_TRASH HORIZON_LAUNCHER_CLIPBOARD HORIZON_LAUNCHER_DESKTOP; do
+              mkdir -p "$scratch/$key"
+              export "$key=$scratch/$key"
+            done
+            export HORIZON_LAUNCHER_NO_SELF_UPDATE=1 HORIZON_NO_AUDIO=1
+            image="/dist/Elyhorizon-$VERSION-linux-x86_64.AppImage"
+            "$image" --appimage-extract-and-run --version
+            "$image" --appimage-extract-and-run --json account ely-status > "$scratch/auth.json"
+            jq -e --arg id "$EXPECTED_CLIENT_ID" ".bundled_client_id == \$id and .flow == \"authorization_code_pkce\" and .client_secret_required == false" "$scratch/auth.json"
+            cd "$scratch"
+            "$image" --appimage-extract > /dev/null
+            ./squashfs-root/usr/bin/horizon-client --help > /dev/null
+          '
+      - name: Checksum Linux release files
+        run: |
+          cd dist
+          sha256sum *.tar.gz *.AppImage > SHA256SUMS-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: elyhorizon-linux-x86_64
+          path: |
+            dist/*.tar.gz
+            dist/*.AppImage
+            dist/SHA256SUMS-linux
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            os: macos-15
+          - arch: x64
+            os: macos-15-intel
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: '2'
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
+      HORIZON_ELY_CLIENT_ID: ${{ vars.HORIZON_ELY_CLIENT_ID }}
+      HORIZON_MSA_CLIENT_ID: ${{ vars.HORIZON_MSA_CLIENT_ID }}
+      HORIZON_TELEMETRY_URL: 'off'
+      HORIZON_LAUNCHER_NO_SELF_UPDATE: '1'
+      HORIZON_NO_AUDIO: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Version and isolated test homes
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version=$INPUT_VERSION
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then version=${GITHUB_REF_NAME#elyhorizon-v}; fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || { echo '::error::Invalid release version'; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "HORIZON_LAUNCHER_VERSION=$version" >> "$GITHUB_ENV"
+          echo "HORIZON_LAUNCHER_TAG=elyhorizon-v$version" >> "$GITHUB_ENV"
+          echo "HORIZON_VERSION=$version" >> "$GITHUB_ENV"
+          scratch=$(mktemp -d)
+          for key in HORIZON_HOME HORIZON_LAUNCHER_HOME XDG_DATA_HOME XDG_CONFIG_HOME HORIZON_LAUNCHER_TRASH HORIZON_LAUNCHER_CLIPBOARD HORIZON_LAUNCHER_DESKTOP; do
+            mkdir -p "$scratch/$key"
+            echo "$key=$scratch/$key" >> "$GITHUB_ENV"
+          done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Require a valid public Ely.by Desktop registration
+        run: python tools/check_ely_oauth.py
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            launcher -> target
+          shared-key: elyhorizon-macos-${{ matrix.arch }}
+      - name: Test and build launcher with runtime Metal shaders
+        run: |
+          cargo test --manifest-path launcher/Cargo.toml --release --locked --features gpui_platform/runtime_shaders --lib --bins
+          cargo build --manifest-path launcher/Cargo.toml --release --locked --features gpui_platform/runtime_shaders --bin horizon-launcher
+          cargo build --release --locked -p horizon-client --bin horizon-client
+      - name: Require system-only dynamic libraries
+        run: |
+          for binary in launcher/target/release/horizon-launcher target/release/horizon-client; do
+            others=$(otool -L "$binary" | tail -n +2 | awk '{print $1}' | grep -v -E '^(/usr/lib/|/System/Library/)' || true)
+            [[ -z "$others" ]] || { echo "::error::$binary links non-system libraries: $others"; exit 1; }
+          done
+      - name: Package Elyhorizon app, ZIP and DMG
+        run: bash packaging/macos/elyhorizon.sh launcher/target/release/horizon-launcher target/release/horizon-client "$VERSION" dist '${{ matrix.arch }}'
+      - name: Verify mounted installer and embedded authentication
+        run: |
+          set -euo pipefail
+          base="Elyhorizon-$VERSION-macos-${{ matrix.arch }}"
+          extracted=$(mktemp -d)
+          ditto -x -k "dist/$base.zip" "$extracted"
+          codesign --verify --deep --strict "$extracted/Elyhorizon.app"
+          mountpoint=$(mktemp -d)
+          hdiutil attach "dist/$base.dmg" -mountpoint "$mountpoint" -nobrowse -readonly
+          trap 'hdiutil detach "$mountpoint"' EXIT
+          installed=$(mktemp -d)
+          ditto "$mountpoint/Elyhorizon.app" "$installed/Elyhorizon.app"
+          codesign --verify --deep --strict "$installed/Elyhorizon.app"
+          for binary in horizon-launcher horizon-client; do
+            cmp "$extracted/Elyhorizon.app/Contents/MacOS/$binary" "$installed/Elyhorizon.app/Contents/MacOS/$binary"
+          done
+          expected="$HORIZON_ELY_CLIENT_ID"
+          unset HORIZON_ELY_CLIENT_ID HORIZON_ELY_CLIENT_SECRET HORIZON_ELY_REDIRECT_URI
+          export HORIZON_LAUNCHER_HOME="$(mktemp -d)"
+          "$installed/Elyhorizon.app/Contents/MacOS/horizon-launcher" --json account ely-status > macos-auth.json
+          jq -e --arg id "$expected" '.client_id == $id and .bundled_client_id == $id and .flow == "authorization_code_pkce" and .client_secret_required == false' macos-auth.json
+          "$installed/Elyhorizon.app/Contents/MacOS/horizon-client" --help > /dev/null
+      - name: Checksum macOS release files
+        run: |
+          cd dist
+          shasum -a 256 *.zip *.dmg > SHA256SUMS-macos-${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: elyhorizon-macos-${{ matrix.arch }}
+          path: |
+            dist/*.zip
+            dist/*.dmg
+            dist/SHA256SUMS-macos-*
+          if-no-files-found: error
+          retention-days: 14
+
   release:
-    needs: build
+    needs: [build, linux, macos]
     if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -179,8 +413,16 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: elyhorizon-windows-x64
+          pattern: elyhorizon-*
+          merge-multiple: true
           path: dist
+      - name: Combine platform checksums
+        run: |
+          sed -i 's/\r$//' dist/SHA256SUMS
+          for sums in dist/SHA256SUMS-*; do
+            cat "$sums" >> dist/SHA256SUMS
+            rm "$sums"
+          done
       - name: Verify archive checksum
         working-directory: dist
         run: sha256sum --check SHA256SUMS
@@ -212,6 +454,10 @@ jobs:
           The installer installs Elyhorizon for your Windows account, adds a Start menu shortcut,
           and includes both the launcher and matching Horizon client. Administrator access is not required.
           A portable ZIP is also available; extract it and keep both executables together.
+          Linux x86_64: download the AppImage, make it executable, and run it.
+          A tar.gz containing the launcher and matching client is also available.
+          macOS: choose arm64 for Apple Silicon or x64 for Intel; open the DMG and drag Elyhorizon into Applications.
+          Mac apps are ad hoc signed, not Apple-notarized; macOS may require explicit approval to open them.
 
           Includes the matching Horizon client with Ely.by account and skin support.
           Browser sign-in uses public Desktop OAuth with S256 PKCE; no client secret is included or required.
@@ -219,6 +465,6 @@ jobs:
           NOTES
           options=(--latest=false)
           if [[ "$VERSION" == *-* ]]; then options+=(--prerelease); fi
-          gh release create "$TAG" dist/*.zip dist/*-setup.exe dist/SHA256SUMS --verify-tag \
+          gh release create "$TAG" dist/*.zip dist/*-setup.exe dist/*.tar.gz dist/*.AppImage dist/*.dmg dist/SHA256SUMS --verify-tag \
             --title "Elyhorizon $VERSION" --notes-file notes.md --draft "${options[@]}"
           gh release edit "$TAG" --draft=false "${options[@]}"

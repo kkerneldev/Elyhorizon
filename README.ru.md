@@ -9,13 +9,15 @@
 <h1 align="center">Elyhorizon</h1>
 
 <p align="center">
-  <b>Horizon с аккаунтами Ely.by и своим установщиком для Windows.</b><br>
+  <b>Horizon с аккаунтами Ely.by для Windows, Linux и macOS.</b><br>
   Независимый форк <a href="https://github.com/horizon-rust/horizon">Horizon</a> — клиента Minecraft: Java Edition 26.3, написанного на Rust.
 </p>
 
 <p align="center">
   <a href="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml"><img src="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml/badge.svg" alt="Сборка Elyhorizon"></a>
   <img src="https://img.shields.io/badge/Windows-x64-5b3fd6" alt="Windows x64">
+  <img src="https://img.shields.io/badge/Linux-x86__64-208260" alt="Linux x86_64">
+  <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-555555" alt="macOS Apple Silicon и Intel">
   <img src="https://img.shields.io/badge/Ely.by-Browser%20OAuth-208260" alt="Вход Ely.by через браузер">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-5b3fd6" alt="Лицензия MIT"></a>
 </p>
@@ -43,11 +45,25 @@
 | Аккаунты Ely.by | Вход через системный браузер, выбор аккаунта и обновление сессии |
 | Ник и скин | Данные выбранного аккаунта передаются в Horizon; скины загружаются из Ely.by |
 | Minecraft Java | Для Java-запусков с Ely.by подключается authlib-injector |
-| Установка | Один установщик для лаунчера и Rust-клиента Horizon |
-| Портативный запуск | ZIP с обоими EXE для запуска без установки |
-| Сборка релизов | GitHub Actions собирает Windows x64, проверяет установку и публикует файлы |
+| Установка | Установщик Windows, AppImage Linux и DMG macOS с подходящим клиентом Horizon |
+| Портативный запуск | ZIP для Windows/macOS и tar.gz для Linux с обоими исполняемыми файлами |
+| Сборка релизов | GitHub Actions собирает Windows, Linux и обе архитектуры Mac, проверяет пакеты и публикует файлы |
+
+## Поддерживаемые платформы
+
+| Платформа | Архитектура и базовые требования | Форматы |
+| --- | --- | --- |
+| Windows | x64 | Установщик EXE, портативный ZIP |
+| Linux | x86_64, glibc 2.35+; Ubuntu 22.04+, Debian 12+, актуальный Arch и совместимая Fedora | AppImage, tar.gz |
+| macOS | Apple Silicon (arm64) и Intel (x64); целевая версия сборки — macOS 12+ | DMG, ZIP с приложением |
+
+Проверки запуска пакетов выполняются в GitHub Actions. Для macOS используются
+runner'ы macOS 15; совместимость со старыми версиями, графику и браузерный вход
+нужно дополнительно проверять на целевой системе.
 
 ## Скачать и установить
+
+### Windows
 
 1. Открой [Releases этого форка](https://github.com/kkerneldev/Elyhorizon/releases).
 2. Скачай **`Elyhorizon-<версия>-windows-x64-setup.exe`**.
@@ -66,6 +82,34 @@
 
 Если файлов для скачивания ещё нет, сначала запусти
 [релизный workflow](docs/elyhorizon-releases.md) в своём GitHub-репозитории.
+
+### Linux: Arch, Ubuntu, Debian, Fedora и совместимые дистрибутивы
+
+Скачай `Elyhorizon-<версия>-linux-x86_64.AppImage` из Releases и запусти:
+
+```sh
+chmod +x Elyhorizon-<версия>-linux-x86_64.AppImage
+./Elyhorizon-<версия>-linux-x86_64.AppImage
+```
+
+AppImage включает лаунчер, подходящий клиент Horizon и библиотеки приложения.
+Сборка рассчитана на настольные системы с glibc 2.35+: Ubuntu 22.04+, Debian 12+,
+актуальный Arch и совместимые версии Fedora. Драйвер видеокарты устанавливается
+через твой дистрибутив. Если FUSE недоступен, добавь `--appimage-extract-and-run`.
+
+Также доступен `linux-x86_64.tar.gz`: распакуй всю папку и запусти
+`./horizon-launcher`, оставив `horizon-client` рядом. Архив использует системные
+библиотеки; для переносимого запуска удобнее AppImage.
+
+### macOS: Apple Silicon и Intel
+
+Для Apple Silicon (M1/M2/M3 и новее) выбери `macos-arm64.dmg`, для Intel —
+`macos-x64.dmg`. Открой DMG и перетащи **Elyhorizon.app** в **Applications**.
+Также доступен ZIP с тем же приложением. Лаунчер и подходящий клиент Horizon
+находятся внутри `.app`; сохраняй пакет приложения целиком.
+
+Сборки подписаны ad hoc, без нотариализации Apple. При первом запуске macOS может
+потребовать явное разрешение в **Системные настройки → Конфиденциальность и безопасность**.
 
 ## Вход через Ely.by
 
@@ -101,7 +145,7 @@ Ely.by отвечает за аккаунты и текстуры. Файлы Mi
 
 ## Своя сборка в GitHub Actions
 
-Открой **Actions → Elyhorizon Windows release → Run workflow**, укажи новую
+Открой **Actions → Elyhorizon release → Run workflow**, укажи новую
 версию, например `0.2.1`, и включи `publish`. Также можно отправить тег
 `elyhorizon-v0.2.1`.
 

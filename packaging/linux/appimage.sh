@@ -4,7 +4,7 @@
 # libraries stay the machine's (see `system_library`): a Vulkan driver or a glibc from another
 # machine cannot be packaged.
 #
-#   packaging/linux/appimage.sh BINARY VERSION OUTDIR
+#   packaging/linux/appimage.sh BINARY VERSION OUTDIR [ELYHORIZON_CLIENT]
 #
 # Needs patchelf, and appimagetool: the AppImage project's, 1.9.1 by default, downloaded here and checked against
 # its SHA-256 ($APPIMAGETOOL names one already on the machine, as the .dmg build takes $DMGBUILD).
@@ -19,6 +19,13 @@ binary=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 version=$2
 out=$(mkdir -p "$3" && cd "$3" && pwd)
 name=horizon-launcher-linux-x86_64.AppImage
+client=${4:-}
+if [[ -n "$client" ]]; then
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([.-][A-Za-z0-9]+)*)?$ ]] || { echo 'error: invalid Elyhorizon version' >&2; exit 1; }
+  client=$(cd "$(dirname "$client")" && pwd)/$(basename "$client")
+  [[ -f "$client" ]] || { echo 'error: matching Horizon client is missing' >&2; exit 1; }
+  name=Elyhorizon-$version-linux-x86_64.AppImage
+fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -29,10 +36,19 @@ mkdir -p "$appdir/usr/bin" "$appdir/usr/lib" \
 # The program.
 cp "$binary" "$appdir/usr/bin/horizon-launcher"
 chmod 755 "$appdir/usr/bin/horizon-launcher"
+if [[ -n "$client" ]]; then
+  cp "$client" "$appdir/usr/bin/horizon-client"
+  chmod 755 "$appdir/usr/bin/horizon-client"
+  mkdir -p "$appdir/usr/share/doc/elyhorizon"
+  cp "$here/../../LICENSE" "$here/../../THIRD_PARTY_NOTICES.md" "$here/../../docs/elyby-account.md" "$appdir/usr/share/doc/elyhorizon/"
+fi
 
 # Both places: AppRun's, and the one desktop environments read once the image is unpacked.
 cp "$here/horizon-launcher.desktop" "$appdir/horizon-launcher.desktop"
 cp "$here/horizon-launcher.desktop" "$appdir/usr/share/applications/horizon-launcher.desktop"
+if [[ -n "$client" ]]; then
+  sed -i 's/^Name=Horizon$/Name=Elyhorizon/' "$appdir/horizon-launcher.desktop" "$appdir/usr/share/applications/horizon-launcher.desktop"
+fi
 cp -R "$here/../icons/hicolor/." "$appdir/usr/share/icons/hicolor/"
 cp "$here/../icons/hicolor/512x512/apps/horizon.png" "$appdir/horizon.png"
 ln -s horizon.png "$appdir/.DirIcon"
@@ -72,6 +88,7 @@ system_library() {
 
 # Everything else the launcher links, then everything those need, until nothing new is added.
 todo=("$appdir/usr/bin/horizon-launcher")
+if [[ -n "$client" ]]; then todo+=("$appdir/usr/bin/horizon-client"); fi
 seen=" "
 while [[ ${#todo[@]} -gt 0 ]]; do
   elf=${todo[0]}
@@ -91,6 +108,7 @@ done
 # its own folder. A run path is the file's own, so nothing the launcher starts inherits it.
 command -v patchelf > /dev/null || { echo "error: patchelf is needed (apt install patchelf)" >&2; exit 1; }
 patchelf --set-rpath '$ORIGIN/../lib' "$appdir/usr/bin/horizon-launcher"
+if [[ -n "$client" ]]; then patchelf --set-rpath '$ORIGIN/../lib' "$appdir/usr/bin/horizon-client"; fi
 for lib in "$appdir"/usr/lib/*.so*; do
   if [[ -e "$lib" ]]; then patchelf --set-rpath '$ORIGIN' "$lib"; fi
 done
@@ -99,6 +117,9 @@ done
 # machine that builds this would make an image that starts nowhere. No LD_LIBRARY_PATH: the run
 # paths alone must find them.
 missing=$(ldd "$appdir/usr/bin/horizon-launcher" | grep "not found" || true)
+if [[ -n "$client" ]]; then
+  missing+=$(ldd "$appdir/usr/bin/horizon-client" | grep "not found" || true)
+fi
 [[ -z "$missing" ]] || {
   echo "error: the launcher links libraries this machine does not have:" >&2
   echo "$missing" >&2

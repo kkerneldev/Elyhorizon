@@ -9,13 +9,15 @@
 <h1 align="center">Elyhorizon</h1>
 
 <p align="center">
-  <b>Horizon with Ely.by accounts and its own Windows installer.</b><br>
+  <b>Horizon with Ely.by accounts for Windows, Linux and macOS.</b><br>
   An independent fork of <a href="https://github.com/horizon-rust/horizon">Horizon</a>, a Minecraft: Java Edition 26.3 client written in Rust.
 </p>
 
 <p align="center">
   <a href="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml"><img src="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml/badge.svg" alt="Elyhorizon build"></a>
   <img src="https://img.shields.io/badge/Windows-x64-5b3fd6" alt="Windows x64">
+  <img src="https://img.shields.io/badge/Linux-x86__64-208260" alt="Linux x86_64">
+  <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-555555" alt="macOS Apple Silicon and Intel">
   <img src="https://img.shields.io/badge/Ely.by-Browser%20OAuth-208260" alt="Ely.by sign-in through your browser">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-5b3fd6" alt="MIT license"></a>
 </p>
@@ -44,11 +46,25 @@ partnership.
 | Ely.by accounts | Sign in through your system browser, select an account, and refresh sessions |
 | Player name and skin | Pass the selected account to Horizon and load textures from Ely.by |
 | Minecraft Java | Use authlib-injector for Java instances launched with Ely.by |
-| Installation | One installer for the launcher and Horizon Rust client |
-| Portable launch | A ZIP containing both executables, with no installation required |
-| Release builds | GitHub Actions builds Windows x64, tests installation, and publishes the files |
+| Installation | Windows setup, Linux AppImage and macOS DMG, each including the matching Horizon client |
+| Portable launch | Windows/macOS ZIP and Linux tar.gz packages containing both executables |
+| Release builds | GitHub Actions builds Windows, Linux and both Mac architectures, checks packages, and publishes the files |
+
+## Supported platforms
+
+| Platform | Architecture / baseline | Downloads |
+| --- | --- | --- |
+| Windows | x64 | Installer EXE, portable ZIP |
+| Linux | x86_64, glibc 2.35+; Ubuntu 22.04+, Debian 12+, current Arch and compatible Fedora | AppImage, tar.gz |
+| macOS | Apple Silicon (arm64) and Intel (x64); macOS 12+ build target | DMG, app bundle ZIP |
+
+Package startup checks run in GitHub Actions. macOS checks use macOS 15 runners;
+compatibility with older macOS versions, graphics and interactive browser sign-in
+must also be verified on the target machine.
 
 ## Download and install
+
+### Windows
 
 1. Open [this fork's Releases](https://github.com/kkerneldev/Elyhorizon/releases).
 2. Download **`Elyhorizon-<version>-windows-x64-setup.exe`**.
@@ -66,6 +82,34 @@ support. Imported builds and builds with native mods use their own executable.
 
 If no downloads are available yet, run the
 [release workflow](docs/elyhorizon-releases.md) in your GitHub repository first.
+
+### Linux: Arch, Ubuntu, Debian, Fedora and compatible distributions
+
+Download `Elyhorizon-<version>-linux-x86_64.AppImage` from Releases, then run:
+
+```sh
+chmod +x Elyhorizon-<version>-linux-x86_64.AppImage
+./Elyhorizon-<version>-linux-x86_64.AppImage
+```
+
+The AppImage contains the launcher, matching Horizon client and bundled application
+libraries. It targets desktop systems with glibc 2.35 or newer: Ubuntu 22.04+,
+Debian 12+, current Arch and compatible Fedora releases. Graphics drivers must
+come from your distribution. If FUSE is unavailable, add `--appimage-extract-and-run`.
+
+A `linux-x86_64.tar.gz` is also available. Extract the entire folder and run
+`./horizon-launcher`, keeping `horizon-client` beside it. This archive relies on
+system libraries; the AppImage is the recommended portable download.
+
+### macOS: Apple Silicon and Intel
+
+Choose `macos-arm64.dmg` for Apple Silicon (M1/M2/M3 and later) or `macos-x64.dmg`
+for an Intel Mac. Open the DMG and drag **Elyhorizon.app** into **Applications**.
+A ZIP of the same app is also available. Both the launcher and matching Horizon
+client are inside the app bundle; keep the bundle intact.
+
+These builds are ad hoc signed, not Apple-notarized. macOS may require explicit
+approval in **System Settings → Privacy & Security** before first launch.
 
 ## Sign in with Ely.by
 
@@ -100,7 +144,7 @@ this fork is built.
 
 ## Build a release with GitHub Actions
 
-Open **Actions → Elyhorizon Windows release → Run workflow**, enter a new
+Open **Actions → Elyhorizon release → Run workflow**, enter a new
 version such as `0.2.1`, and enable `publish`. You can also push a tag such as
 `elyhorizon-v0.2.1`.
 
