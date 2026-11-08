@@ -23,6 +23,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 
@@ -134,10 +135,17 @@ def python():
     global _PYTHON
     if _PYTHON is None:
         _PYTHON = "python3"
-        for name in ("python3", "python", "py"):
-            found = shutil.which(name)
-            probe = [found, "-c", "import sys; sys.exit(sys.version_info < (3,))"] if found else None
-            if probe and subprocess.run(probe, capture_output=True).returncode == 0:
+        # The running interpreter is already known to execute this Python 3 tool.
+        # A Windows Store alias can exist on PATH yet fail CreateProcess entirely.
+        candidates = [sys.executable] + [shutil.which(name) for name in ("python3", "python", "py")]
+        for found in candidates:
+            if not found:
+                continue
+            try:
+                done = subprocess.run([found, "-c", "import sys; sys.exit(sys.version_info < (3,))"], capture_output=True)
+            except OSError:
+                continue
+            if done.returncode == 0:
                 _PYTHON = found
                 break
     return _PYTHON

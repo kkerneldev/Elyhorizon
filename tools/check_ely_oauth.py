@@ -32,13 +32,25 @@ def request(path, fields=None, post=False):
     except urllib.error.HTTPError as error:
         response = error
     with response:
-        return response.code, json.loads(response.read(65536))
+        status = response.code
+        body = response.read(65537)
+        try:
+            value = json.loads(body) if len(body) <= 65536 else {}
+        except (ValueError, UnicodeError):
+            value = {}
+        return status, value if isinstance(value, dict) else {}
 
 
 def check(client_id, send=request):
     if not client_id or not client_id.strip():
         raise ValueError("Set repository Actions Variable HORIZON_ELY_CLIENT_ID to your public Desktop application ID. No CLIENT_SECRET is needed.")
-    status, metadata = send("/.well-known/openid-configuration")
+    def checked(path, fields=None, post=False):
+        status, value = send(path, fields, post)
+        if status >= 500 or status == 429:
+            raise ValueError(f"Ely.by {path} returned HTTP {status}. The service is unavailable; retry later, without changing credentials.")
+        return status, value
+
+    status, metadata = checked("/.well-known/openid-configuration")
     if (status != 200 or metadata.get("issuer") != ISSUER
             or "S256" not in metadata.get("code_challenge_methods_supported", [])
             or "none" not in metadata.get("token_endpoint_auth_methods_supported", [])):
@@ -47,20 +59,20 @@ def check(client_id, send=request):
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     fields = dict(client_id=client_id.strip(), redirect_uri="http://127.0.0.1:38467/oauth/ely",
                   response_type="code", scope=SCOPES, state=secrets.token_urlsafe(32))
-    status, value = send("/api/oauth2/v1/validate", fields)
+    status, value = checked("/api/oauth2/v1/validate", fields)
     if value.get("error") == "invalid_client":
         raise ValueError(f"Ely.by returned HTTP {status} invalid_client for the configured public Client ID {client_id.strip()!r}. Verify this exact ID in the Ely.by Desktop registration; no client secret will be used.")
     if status != 400 or value.get("parameter") != "code_challenge":
         raise ValueError("Ely.by did not require PKCE for this ID. Register a Desktop application, not the old Website application (elyhorizon2).")
     pkce = dict(fields, code_challenge=challenge, code_challenge_method="S256")
-    status, value = send("/api/oauth2/v1/validate", pkce)
+    status, value = checked("/api/oauth2/v1/validate", pkce)
     if status != 200 or value.get("success") is not True:
         raise ValueError("Ely.by rejected public Desktop authorization with S256 and a loopback redirect. Check the registered client ID.")
-    status, value = send("/api/oauth2/v1/validate", dict(pkce, code_challenge_method="plain"))
+    status, value = checked("/api/oauth2/v1/validate", dict(pkce, code_challenge_method="plain"))
     if status != 400 or value.get("parameter") != "code_challenge_method":
         raise ValueError("Ely.by did not reject PKCE downgrade; refusing to publish.")
     # An intentionally invalid code cannot mint a token. This checks client authentication only.
-    status, value = send("/api/oauth2/v1/token", dict(
+    status, value = checked("/api/oauth2/v1/token", dict(
         client_id=fields["client_id"], redirect_uri=fields["redirect_uri"],
         grant_type="authorization_code", code="elyhorizon-release-probe-" + secrets.token_urlsafe(32),
         code_verifier=verifier), True)

@@ -347,7 +347,6 @@
   "Local file · {file}": "Archivo local · {file}",
   "Horizon's landscape. Pick a PNG, JPEG or WebP picture of your own.": "El paisaje de Horizon. Elige tu propia imagen en PNG, JPEG o WebP.",
   "Not needed": "No necesarios",
-  "This build of the launcher has no Microsoft sign-in (HORIZON_MSA_CLIENT_ID), so it can't start the game.": "Esta compilación del lanzador no tiene inicio de sesión con Microsoft (HORIZON_MSA_CLIENT_ID), por lo que no puede iniciar el juego.",
   "Offline name · plays": "Nombre sin conexión · jugando",
   "Run the game through": "Ejecutar el juego a través de",
   "needed by another pack": "necesario para otro paquete",
@@ -917,5 +916,8 @@
   "The Minecraft server manifest has no integrity checksum.": "The Minecraft server manifest has no integrity checksum.",
   "The Minecraft server download failed its integrity check. Retry the installation.": "The Minecraft server download failed its integrity check. Retry the installation.",
   "The account key must be readable only by its owner (mode 0600).": "The account key must be readable only by its owner (mode 0600).",
-  "The account key is damaged. Restore it from a secure backup or sign in again.": "The account key is damaged. Restore it from a secure backup or sign in again."
+  "The account key is damaged. Restore it from a secure backup or sign in again.": "The account key is damaged. Restore it from a secure backup or sign in again.",
+  "Checking the Minecraft {version} server files.": "Checking the Minecraft {version} server files.",
+  "The Minecraft server manifest has no download URL.": "The Minecraft server manifest has no download URL.",
+  "Microsoft sign-in is not configured in this build (HORIZON_MSA_CLIENT_ID).": "Microsoft sign-in is not configured in this build (HORIZON_MSA_CLIENT_ID)."
 }

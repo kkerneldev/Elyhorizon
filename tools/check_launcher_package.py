@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Offline smoke check of installed programs, using only fresh disposable player homes."""
 import argparse
 import json
@@ -6,6 +6,11 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+
+if __package__:
+    from . import lab
+else:
+    import lab
 
 HOMES = ("HORIZON_HOME", "HORIZON_LAUNCHER_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME",
          "HORIZON_LAUNCHER_TRASH", "HORIZON_LAUNCHER_CLIPBOARD", "HORIZON_LAUNCHER_DESKTOP")
@@ -24,7 +29,7 @@ def check(launcher, client, client_id, appimage=False, run=subprocess.run):
             directory = Path(scratch, key)
             directory.mkdir()
             env[key] = str(directory)
-        env.update(HORIZON_LAUNCHER_NO_SELF_UPDATE="1", HORIZON_NO_AUDIO="1", HORIZON_TELEMETRY_URL="off")
+        env = lab.game_env(env, HORIZON_TELEMETRY_URL="off")
         prefix = [str(launcher)] + (["--appimage-extract-and-run"] if appimage else [])
         def call(args):
             result = run(args, cwd=scratch, env=env, capture_output=True, text=True, timeout=60, check=False)

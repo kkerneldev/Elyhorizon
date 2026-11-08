@@ -51,3 +51,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "HTTP 401 invalid_client") as raised:
             gate.check("elyhorizondesktop", service)
         self.assertNotIn("reflected-private-value", str(raised.exception))
+
+    def test_provider_outages_report_status_instead_of_suggesting_new_credentials(self):
+        for status in (503, 504):
+            with self.subTest(status=status), self.assertRaisesRegex(ValueError, f"HTTP {status}"):
+                gate.check("elyhorizondesktop", lambda *_: (status, {}))

@@ -45,7 +45,27 @@ fn restore(window: &Window) {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn restore(window: &Window) {
+    use objc2_app_kit::NSView;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if let Ok(handle) = HasWindowHandle::window_handle(window) {
+        if let RawWindowHandle::AppKit(handle) = handle.as_raw() {
+            // The live view belongs to this window; this runs on the AppKit/UI thread.
+            let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+            if let Some(native) = view.window() {
+                if native.isMiniaturized() {
+                    native.deminiaturize(None);
+                }
+                native.makeKeyAndOrderFront(None);
+            }
+        }
+    }
+    window.request_attention();
+    window.activate_window();
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn restore(window: &Window) {
     // GPUI delegates to AppKit on macOS and the active X11/Wayland compositor on Linux.
     // Compositors may refuse activation without a recent user activation token. Attention

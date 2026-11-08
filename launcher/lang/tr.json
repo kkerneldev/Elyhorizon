@@ -184,7 +184,6 @@
   "Not prepared. Horizon needs the files of your own Minecraft {version}.": "Hazırlanmadı. Horizon, kendi Minecraft {version} sürümünüzün dosyalarına ihtiyaç duyuyor.",
   "Prepared for Minecraft {version}": "Minecraft {version} için hazırlandı",
   "Prepared for Minecraft {version}, without its sounds: the game will be silent. Prepare again to copy them from your Minecraft install.": "Minecraft {version} için sesler olmadan hazırlandı: oyun sessiz olacak. Minecraft kurulumunuzdan sesleri kopyalamak için tekrar hazırlayın.",
-  "This build of the launcher has no Microsoft sign-in (HORIZON_MSA_CLIENT_ID), so it can't start the game.": "Başlatıcının bu derlemesinde Microsoft oturum açma özelliği (HORIZON_MSA_CLIENT_ID) bulunmuyor, bu nedenle oyunu başlatamıyor.",
   "Sign in with a Microsoft account that owns Minecraft: Java Edition to play": "Oynamak için Minecraft: Java Edition'a sahip bir Microsoft hesabıyla oturum açın",
   "Horizon needs a Microsoft account that owns Minecraft: Java Edition, like other launchers. It also plays online servers with your name and skin.": "Horizon, diğer başlatıcılar gibi Minecraft: Java Edition'a sahip bir Microsoft hesabına ihtiyaç duyar. Ayrıca çevrimiçi sunucularda adınız ve dış görünümünüzle oynamanızı sağlar.",
   "Sign in with Microsoft": "Microsoft ile oturum aç",
@@ -917,5 +916,8 @@
   "The Minecraft server manifest has no integrity checksum.": "The Minecraft server manifest has no integrity checksum.",
   "The Minecraft server download failed its integrity check. Retry the installation.": "The Minecraft server download failed its integrity check. Retry the installation.",
   "The account key must be readable only by its owner (mode 0600).": "The account key must be readable only by its owner (mode 0600).",
-  "The account key is damaged. Restore it from a secure backup or sign in again.": "The account key is damaged. Restore it from a secure backup or sign in again."
+  "The account key is damaged. Restore it from a secure backup or sign in again.": "The account key is damaged. Restore it from a secure backup or sign in again.",
+  "Checking the Minecraft {version} server files.": "Checking the Minecraft {version} server files.",
+  "The Minecraft server manifest has no download URL.": "The Minecraft server manifest has no download URL.",
+  "Microsoft sign-in is not configured in this build (HORIZON_MSA_CLIENT_ID).": "Microsoft sign-in is not configured in this build (HORIZON_MSA_CLIENT_ID)."
 }

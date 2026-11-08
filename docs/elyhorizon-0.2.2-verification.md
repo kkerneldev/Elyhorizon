@@ -1,9 +1,12 @@
-﻿# Elyhorizon 0.2.2 local stabilization and verification
+# Elyhorizon 0.2.2 local stabilization and verification
 
 All changes are on local `main`, starting at `a7d5f71bab`. At the initial check, both
 `origin/main` and the live remote `refs/heads/main` had that same commit. The previous
 `sync/upstream-2026-11-08` branch remains separate; it was not merged into `main`.
-No commits, pushes, tags, PRs, workflow dispatches or releases are part of this work.
+The agent issued no commits, pushes, tags, PRs, workflow dispatches or release operations.
+During verification, externally created commits `598022bdde` and `e7d1d7fd00` appeared on
+`main`/`origin/main`; they were preserved. The latter changes the validation redirect port
+to 38467. The final follow-up fixes remain in the local working tree on that same branch.
 
 ## Authentication findings
 
@@ -45,8 +48,8 @@ errors and timeouts now identify the operation without echoing provider bodies o
 
 Successful saved Ely sign-in restores the existing window once. Windows uses native restoration
 and foreground APIs with taskbar attention if foreground activation is denied, without GPUI's
-simulated keyboard input. macOS/Linux request activation and attention through their window
-backend. Wayland/compositor rules can refuse focus; forced focus is not promised. Native GUI
+simulated keyboard input. macOS explicitly deminiaturizes its existing NSWindow and requests supported application/window
+activation. Linux requests activation and attention through its window backend. Wayland/compositor rules can refuse focus; forced focus is not promised. Native GUI
 behavior remains a manual platform check.
 
 ## Account storage and launching
@@ -73,7 +76,10 @@ The installation path reads:
 4. Asset objects from `resources.download.minecraft.net`, and official Java runtime manifests/files.
 
 The live release-list API, GitHub mirror, Nightly metadata, Mojang version list and pinned 26.3
-manifest all returned HTTP 200 during this investigation. The original users' exact 503/504 URLs
+manifest all returned HTTP 200 during this investigation. HEAD checks also returned 200 for
+the Nightly Windows archive/checksums/signature, both pinned JAR URLs, the asset index,
+a sample Maven library, and the Java runtime index. These were availability probes, not
+an end-to-end authenticated Minecraft installation. The original users' exact 503/504 URLs
 are not available, so that outage was not reproduced or attributed to an invented endpoint.
 
 GETs now have at most four attempts, exponential backoff with bounded jitter, and `Retry-After`
@@ -86,15 +92,17 @@ Interrupted archives resume within the current attempt only with a strong ETag a
 Content-Range. A server ignoring Range restarts from zero. Temporary files are removed after
 failure, and only complete files passing the expected hash replace the destination. Whole-body
 manifest/library reads retry interruptions. Existing valid cached Minecraft files remain reusable;
-large-file partial resume across launcher restarts is not implemented. Server JAR downloads now
-also verify their manifest SHA-1 before promotion.
+large-file partial resume across launcher restarts is not implemented. Server JAR downloads and
+previously cached server JARs are checked against their manifest SHA-1. A stale/corrupt cached JAR
+is replaced only after its replacement verifies successfully.
 
 ## macOS and CI
 
 The failing `an_app_bundle_updates_in_place` fixture copied and re-signed Apple's `/usr/bin/true`.
 It now compiles a minimal native Rust executable and still checks permissions, signing, ZIP
 extraction, bundle replacement, execution, strict signature verification and tamper rejection.
-The old symptom was an unsuccessful child process, not an ignored test. Its precise kernel
+The old symptom was an unsuccessful child process at the execution assertion, rather than a
+permission error reported while starting the child. The regression test remains enabled. Its precise kernel
 termination reason cannot be established on this Windows host; the new fixture removes the
 system-binary signing assumption and reports exit status/mode on failure. Native ARM64/x64 runs
 are still required before calling the macOS issue verified.
@@ -145,8 +153,98 @@ there. Remove runtime `HORIZON_ELY_*` variables so the packaged public ID is tes
 
 ## Verification record
 
-Final local build/test results are recorded after the active checks complete. A pristine Windows
-VM, native Linux/macOS runs, real Microsoft login and a fresh end-to-end login using
-`elyhorizondesktop` have not been verified. The last one is currently blocked by the provider's
+The final Rust checks passed on Windows x64:
+
+- `cargo fmt --manifest-path launcher/Cargo.toml --check`.
+- `cargo clippy --manifest-path launcher/Cargo.toml --all-targets --locked -- -D warnings`.
+- `cargo test --manifest-path launcher/Cargo.toml --locked --lib --bins`: **544 passed**, 7 existing ignored tests.
+- The same tests with `--release` and `RUSTFLAGS=-C target-feature=+crt-static`: **544 passed**, 7 existing ignored tests.
+- The final release launcher EXE built with that same static CRT setting.
+- All existing workflows passed `actionlint`; the public-tree and whitespace checks passed.
+
+The actual local Inno installer was compiled and installed with an isolated AppId and target folder.
+Both installed program hashes matched the staged programs. `tools/check_imports.py` accepted their
+system-only DLL imports. The installed EXE passed `tools/check_launcher_package.py` with fresh
+homes, empty accounts across separate processes and no runtime authentication settings; the game's
+help command also started. Uninstallation removed the test programs and preserved a player-data
+marker outside their installation directory. No existing installation was replaced.
+
+The game EXE in this local installer was the checksum-verified, **unchanged** game from the public
+0.2.2 Windows ZIP, not a newly compiled game. Its source areas have no differences between the
+0.2.2 tag and the initial `main`; this task changes launcher code only. The local installer is an
+offline review artifact, not a release candidate that passed the live OAuth preflight. The normal
+workflow will currently stop at that preflight.
+
+The complete Python suite on the final repository state passed: **621 tests, 35 skipped**
+(`python -m unittest discover -s tests`). The skip count reflects existing platform/fixture
+requirements; no failing tests were disabled. The successful full run followed fixes for the
+new script's UTF-8 BOM, the common game environment helper, and interpreter discovery.
+A Windows Python interpreter-discovery failure found by the full suite was fixed by preferring the
+running interpreter and ignoring non-executable Store aliases. The package checker now shares
+`lab.game_env` with the other harnesses. Initial failures were fixed and rerun, not ignored.
+
+A pristine Windows VM, native Linux/macOS runs, real Microsoft login and a fresh end-to-end login
+using `elyhorizondesktop` have not been verified. The last one is currently blocked by the provider's
 HTTP 401 `invalid_client` response, not by a missing client secret. Do not publish or describe
 this release as fully verified until those checks have been completed.
+
+Windows visual/focus inspection was unavailable because the Computer Use helper returned a
+missing-native-pipe error after retries/reset. Compilation and the once-only completion transition
+are checked; actual minimized-window/browser interaction still needs the manual platform test.
+macOS distribution is still ad hoc signed rather than Developer ID notarized, as disclosed in the
+existing packaging guide. No Gatekeeper or OS focus restrictions were disabled.
+
+## Changed files
+
+These paths are relative to the starting `main` commit and include the externally saved interim
+commits plus the local follow-up fixes:
+
+- `.github/actionlint.yaml`
+- `.github/workflows/elyhorizon-release.yml`
+- `.github/workflows/launcher.yml`
+- `README.md`
+- `README.ru.md`
+- `docs/elyby-account.md`
+- `docs/elyhorizon-0.2.2-verification.md`
+- `docs/elyhorizon-releases.md`
+- `docs/microsoft-account.md`
+- `launcher/Cargo.toml`
+- `launcher/lang/de.json`
+- `launcher/lang/es.json`
+- `launcher/lang/fr.json`
+- `launcher/lang/ja.json`
+- `launcher/lang/pl.json`
+- `launcher/lang/pt-br.json`
+- `launcher/lang/ru.json`
+- `launcher/lang/tr.json`
+- `launcher/lang/uk.json`
+- `launcher/lang/zh.json`
+- `launcher/src/account.rs`
+- `launcher/src/account/ely.rs`
+- `launcher/src/account/ely/oauth.rs`
+- `launcher/src/account/tests.rs`
+- `launcher/src/backend.rs`
+- `launcher/src/github.rs`
+- `launcher/src/lib.rs`
+- `launcher/src/login_focus.rs`
+- `launcher/src/main.rs`
+- `launcher/src/mojang.rs`
+- `launcher/src/mojang_tests.rs`
+- `launcher/src/network.rs`
+- `launcher/src/network/tests.rs`
+- `launcher/src/while_playing.rs`
+- `tests/test_ely_oauth_release.py`
+- `tests/test_launcher_package.py`
+- `tools/check_ely_oauth.py`
+- `tools/check_launcher_package.py`
+- `tools/port_regen.py`
+
+## Final outcome
+
+The local code and Windows offline packaging checks are ready for review. The release authentication
+goal is **not claimed achieved**: the exact requested public Client ID is still rejected by Ely.by
+with HTTP 401 `invalid_client`, including with redirect port 38467. Resolve that registration/ID
+mismatch against the existing Actions Variable, then repeat the live preflight and real browser
+sign-in on the actual CI artifacts. No hosted backend or confidential client secret is needed.
+Native macOS/Linux execution, graphical focus behavior, real Microsoft login, a clean Windows VM,
+and an authenticated empty-cache Minecraft installation remain the explicit manual/CI checks.

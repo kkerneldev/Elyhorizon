@@ -1559,6 +1559,36 @@ fn download_for(
     }
 }
 
+/// Revalidate this launcher-owned cache on upgrades too: an old truncated JAR must
+/// not look installed solely because its path exists. A failed fetch leaves it alone.
+fn checked_server_jar(
+    metadata: &serde_json::Value,
+    jar: &Path,
+    fetch: sources::Fetch,
+) -> Result<(), String> {
+    let expected = metadata["downloads"]["server"]["sha1"]
+        .as_str()
+        .ok_or_else(|| {
+            crate::i18n::tr("The Minecraft server manifest has no integrity checksum.").to_owned()
+        })?;
+    if sources::sha1_file(jar).as_deref() == Some(expected) {
+        return Ok(());
+    }
+    let url = metadata["downloads"]["server"]["url"]
+        .as_str()
+        .ok_or_else(|| {
+            crate::i18n::tr("The Minecraft server manifest has no download URL.").to_owned()
+        })?;
+    let body = fetch(url)?;
+    if sources::sha1_hex(&body) != expected {
+        return Err(crate::i18n::tr(
+            "The Minecraft server download failed its integrity check. Retry the installation.",
+        )
+        .into());
+    }
+    sources::write_file(jar, &body)
+}
+
 /// The Java home for this version: a runtime for precompiled exporters, a JDK for older
 /// preparers or changed sources. Forward the selection to external preparers too.
 /// Else try the official launcher's Java in `games`, then download the runtime named by
@@ -1788,32 +1818,15 @@ pub fn preparer(
     let jar = data_dir()
         .join("server-jars")
         .join(format!("{version}.jar"));
-    if !reused && !jar.exists() {
-        let json: serde_json::Value =
+    if !reused {
+        let metadata: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&manifest).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
-        let url = json["downloads"]["server"]["url"]
-            .as_str()
-            .ok_or_else(|| format!("{} has no server download", manifest.display()))?;
-        log(format!("Downloading the {version} server jar from Mojang"));
-        fs::create_dir_all(jar.parent().unwrap()).map_err(|e| e.to_string())?;
-        let body = get_bytes(url)?;
-        let expected = json["downloads"]["server"]["sha1"]
-            .as_str()
-            .ok_or_else(|| {
-                crate::i18n::tr("The Minecraft server manifest has no integrity checksum.")
-                    .to_owned()
-            })?;
-        if sources::sha1_hex(&body) != expected {
-            return Err(crate::i18n::tr(
-                "The Minecraft server download failed its integrity check. Retry the installation.",
-            )
-            .into());
-        }
-        let partial = jar.with_extension("partial");
-        fs::write(&partial, body)
-            .and_then(|_| fs::rename(&partial, &jar))
-            .map_err(|e| e.to_string())?;
+        log(crate::i18n::trf(
+            "Checking the Minecraft {version} server files.",
+            &[("version", &version)],
+        ));
+        checked_server_jar(&metadata, &jar, &get_bytes)?;
     }
     if let Some(binary) = binary {
         if horizon_prepare::sources_sha256(&dir.join(PREPARER_CRATE)).as_deref()
@@ -5213,4 +5226,24 @@ fn a_matching_bundled_game_is_used_without_replacing_custom_or_incompatible_buil
     assert!(bundled_client("nightly-test", &version, &bundled).is_none());
     assert!(bundled_client("nightly-test", &version, &root.join("missing")).is_none());
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_stale_server_jar_is_repaired_only_after_verification_and_valid_cache_needs_no_network() {
+    let mut random = [0u8; 12];
+    getrandom::fill(&mut random).unwrap();
+    let suffix: String = random.iter().map(|n| format!("{n:02x}")).collect();
+    let dir = std::env::temp_dir().join(format!("ely-server-cache-{suffix}"));
+    fs::create_dir(&dir).unwrap();
+    let jar = dir.join("server.jar");
+    fs::write(&jar, b"old-truncated-cache").unwrap();
+    // SHA-1 of "abc", an independent published test vector.
+    let metadata = serde_json::json!({"downloads":{"server":{"url":"https://example.invalid/server.jar", "sha1":"a9993e364706816aba3e25717850c26c9cd0d89d"}}});
+    assert!(checked_server_jar(&metadata, &jar, &|_| Ok(b"corrupt-download".to_vec())).is_err());
+    assert_eq!(fs::read(&jar).unwrap(), b"old-truncated-cache");
+    checked_server_jar(&metadata, &jar, &|_| Ok(b"abc".to_vec())).unwrap();
+    assert_eq!(fs::read(&jar).unwrap(), b"abc");
+    checked_server_jar(&metadata, &jar, &|_| panic!("valid cache must not fetch")).unwrap();
+    fs::remove_file(&jar).unwrap();
+    fs::remove_dir(dir).unwrap();
 }

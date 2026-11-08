@@ -184,7 +184,6 @@
   "Not prepared. Horizon needs the files of your own Minecraft {version}.": "未準備です。Horizonには、あなた自身のMinecraft {version}のファイルが必要です。",
   "Prepared for Minecraft {version}": "Minecraft {version}用に準備済み",
   "Prepared for Minecraft {version}, without its sounds: the game will be silent. Prepare again to copy them from your Minecraft install.": "Minecraft {version}用に準備済みですが、サウンドなしです。ゲームは無音になります。Minecraftインストールからコピーするには、再度準備してください。",
-  "This build of the launcher has no Microsoft sign-in (HORIZON_MSA_CLIENT_ID), so it can't start the game.": "このランチャービルドにはMicrosoftサインイン機能（HORIZON_MSA_CLIENT_ID）がないため、ゲームを起動できません。",
   "Sign in with a Microsoft account that owns Minecraft: Java Edition to play": "プレイするには、Minecraft: Java Editionを所有するMicrosoftアカウントでサインインしてください",
   "Horizon needs a Microsoft account that owns Minecraft: Java Edition, like other launchers. It also plays online servers with your name and skin.": "Horizonは他のランチャーと同様に、Minecraft: Java Editionを所有するMicrosoftアカウントが必要です。これにより、あなたの名前とスキンでオンラインサーバーに接続できます。",
   "Sign in with Microsoft": "Microsoftでサインイン",
@@ -917,5 +916,8 @@
   "The Minecraft server manifest has no integrity checksum.": "The Minecraft server manifest has no integrity checksum.",
   "The Minecraft server download failed its integrity check. Retry the installation.": "The Minecraft server download failed its integrity check. Retry the installation.",
   "The account key must be readable only by its owner (mode 0600).": "The account key must be readable only by its owner (mode 0600).",
-  "The account key is damaged. Restore it from a secure backup or sign in again.": "The account key is damaged. Restore it from a secure backup or sign in again."
+  "The account key is damaged. Restore it from a secure backup or sign in again.": "The account key is damaged. Restore it from a secure backup or sign in again.",
+  "Checking the Minecraft {version} server files.": "Checking the Minecraft {version} server files.",
+  "The Minecraft server manifest has no download URL.": "The Minecraft server manifest has no download URL.",
+  "Microsoft sign-in is not configured in this build (HORIZON_MSA_CLIENT_ID).": "Microsoft sign-in is not configured in this build (HORIZON_MSA_CLIENT_ID)."
 }

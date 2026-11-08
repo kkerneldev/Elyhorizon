@@ -444,7 +444,11 @@ fn oauth_send(
     let result = match body {
         Some(Body::Form(fields)) => request.send_form(&fields),
         Some(Body::Json(value)) => request.send_json(value),
-        None => request.call(),
+        None => {
+            let endpoint = request.url().to_owned();
+            crate::network::retry_request(&endpoint, || request.clone().call().map_err(Box::new))
+                .map_err(|error| *error)
+        }
     };
     let response = match result {
         Ok(response) | Err(ureq::Error::Status(_, response)) => response,
@@ -1011,7 +1015,7 @@ mod tests {
             (503, json!({"error":"private-access"})),
             (200, json!({"uuid":"invalid", "username":"private-access"})),
         ] {
-            let (config, worker) = api(vec![(status, body)]);
+            let (config, worker) = api(vec![(status, body); if status == 503 { 4 } else { 1 }]);
             let error = profile(&config, "private-access").unwrap_err();
             assert!(!error.contains("private-access"));
             if status == 503 {
@@ -1051,16 +1055,18 @@ mod tests {
         for (profile_status, can_save, succeeds) in
             [(200, true, true), (503, true, false), (200, false, false)]
         {
-            let (config, worker) = api(vec![
-                (
-                    200,
-                    json!({"access_token":"private-access", "refresh_token":"private-refresh", "expires_in":86400}),
-                ),
+            let mut responses = vec![(
+                200,
+                json!({"access_token":"private-access", "refresh_token":"private-refresh", "expires_in":86400}),
+            )];
+            responses.extend(vec![
                 (
                     profile_status,
-                    json!({"uuid":"ffc8fdc9-5824-509e-8a57-c99b940fb996", "username":"ElyPlayer"}),
-                ),
+                    json!({"uuid":"ffc8fdc9-5824-509e-8a57-c99b940fb996", "username":"ElyPlayer"})
+                );
+                if profile_status == 503 { 4 } else { 1 }
             ]);
+            let (config, worker) = api(responses);
             let flow = BrowserFlow::new(config).unwrap();
             let address = flow.listener.local_addr().unwrap();
             let state = flow.state.clone();
@@ -1087,5 +1093,31 @@ mod tests {
             assert!(!page.contains("private-access") && !page.contains("private-code"));
             worker.join().unwrap();
         }
+    }
+    #[test]
+    fn a_transient_profile_outage_recovers_without_replaying_token_exchange() {
+        let (config, worker) = api(vec![
+            (
+                200,
+                json!({"access_token":"private-access", "refresh_token":"private-refresh", "expires_in":86400}),
+            ),
+            (503, json!({"error":"unavailable"})),
+            (
+                200,
+                json!({"uuid":"ffc8fdc9-5824-509e-8a57-c99b940fb996", "username":"ElyPlayer"}),
+            ),
+        ]);
+        let flow = BrowserFlow::new(config).unwrap();
+        assert_eq!(
+            flow.exchange_code("one-use-code").unwrap().0.name,
+            "ElyPlayer"
+        );
+        let paths: Vec<String> = worker
+            .join()
+            .unwrap()
+            .into_iter()
+            .map(|request| request.0)
+            .collect();
+        assert_eq!(paths, ["/token", "/info", "/info"]);
     }
 }
